@@ -106,6 +106,8 @@ func (c *Chain) MaxQueuedHeaders() int {
 	if c == nil || c.manager == nil {
 		return DefaultMaxQueuedHeaders
 	}
+	// Before SetLedger succeeds, securityParam is zero and the default
+	// floor applies (tests or early bootstrap only).
 	if sp := c.manager.securityParam; sp > 0 {
 		return max(sp*2, DefaultMaxQueuedHeaders)
 	}
@@ -536,6 +538,9 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	if err := c.reconcile(); err != nil {
 		return fmt.Errorf("reconcile chain: %w", err)
 	}
+	if c.persistent && c.manager.securityParam <= 0 {
+		return ErrSecurityParamNotConfigured
+	}
 	// Check headers for rollback point without mutating them
 	if len(c.headers) > 0 {
 		var header queuedHeader
@@ -566,12 +571,11 @@ func (c *Chain) ValidateRollback(point ocommon.Point) error {
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
-	// not subject to this limit. The check is skipped when
-	// securityParam is 0 (ledger not yet initialized) or when
-	// the chain is shorter than K blocks (initial sync), since
-	// the entire chain can be safely replaced during sync.
+	// not subject to this limit. When the chain is shorter than K
+	// blocks (initial sync), the entire chain can be safely
+	// replaced during sync.
 	securityParam := c.manager.securityParam
-	if c.persistent && securityParam > 0 &&
+	if c.persistent &&
 		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(
@@ -599,6 +603,9 @@ func (c *Chain) rollbackLocked(
 	// Verify chain integrity
 	if err := c.reconcile(); err != nil {
 		return nil, fmt.Errorf("reconcile chain: %w", err)
+	}
+	if c.persistent && c.manager.securityParam <= 0 {
+		return nil, ErrSecurityParamNotConfigured
 	}
 	// Check headers for rollback point
 	if len(c.headers) > 0 {
@@ -637,12 +644,11 @@ func (c *Chain) rollbackLocked(
 	forkDepth := c.tipBlockIndex - rollbackBlockIndex
 	// Reject rollbacks that exceed the security parameter K on
 	// the persistent chain. Ephemeral (fork-tracking) chains are
-	// not subject to this limit. The check is skipped when
-	// securityParam is 0 (ledger not yet initialized) or when
-	// the chain is shorter than K blocks (initial sync), since
-	// the entire chain can be safely replaced during sync.
+	// not subject to this limit. When the chain is shorter than K
+	// blocks (initial sync), the entire chain can be safely
+	// replaced during sync.
 	securityParam := c.manager.securityParam
-	if c.persistent && securityParam > 0 &&
+	if c.persistent &&
 		c.tipBlockIndex >= uint64(securityParam) && //nolint:gosec
 		forkDepth > uint64(securityParam) { //nolint:gosec
 		slog.Default().Warn(
@@ -1095,7 +1101,6 @@ func (c *Chain) NotifyIterators() {
 }
 
 func (c *Chain) reconcile() error {
-	securityParam := c.manager.securityParam
 	// We reconcile against the primary/persistent chain, so no need to check if we are that chain
 	if c.persistent {
 		return nil
@@ -1104,6 +1109,10 @@ func (c *Chain) reconcile() error {
 	if !c.manager.chainNeedsReconcile(c.id, c.lastCommonBlockIndex) {
 		return nil
 	}
+	if c.manager.securityParam <= 0 {
+		return ErrSecurityParamNotConfigured
+	}
+	securityParam := c.manager.securityParam
 	// Check our blocks against primary chain until we find a match
 	primaryChain := c.manager.primaryChainLocked()
 	if primaryChain == nil {
