@@ -881,7 +881,7 @@ func (c *Chain) IntersectPoints(count int) []ocommon.Point {
 	if c.tipBlockIndex <= initialBlockIndex {
 		return points
 	}
-	for offset := uint64(denseCount); len(points) < count; offset *= 2 {
+	for offset := uint64(denseCount); len(points) < count; offset *= 2 { //nolint:gosec // denseCount is bounded to non-negative values
 		if offset == 0 || offset >= c.tipBlockIndex {
 			break
 		}

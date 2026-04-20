@@ -45,6 +45,14 @@ type chainsyncRollbackFixture struct {
 	forkPoint     ocommon.Point
 }
 
+type testSecurityParamLedger struct {
+	securityParam int
+}
+
+func (m testSecurityParamLedger) SecurityParam() int {
+	return m.securityParam
+}
+
 func TestHandleEventChainsyncRollbackSynchronizesLedgerTip(t *testing.T) {
 	fixture := newChainsyncRollbackFixture(t)
 
@@ -786,6 +794,10 @@ func newChainsyncRollbackFixture(t *testing.T) *chainsyncRollbackFixture {
 	db := newTestDB(t)
 	cm, err := chain.NewManager(db, nil)
 	require.NoError(t, err)
+	require.NoError(
+		t,
+		cm.SetLedger(testSecurityParamLedger{securityParam: 2}),
+	)
 
 	ancestorHash := testHashBytes("ancestor-block")
 	currentHash := testHashBytes("current-block")
