@@ -278,7 +278,9 @@ func (n *Node) Run(ctx context.Context) error {
 	}
 	n.ledgerState = state
 	n.ouroboros.LedgerState = n.ledgerState
-	n.chainManager.SetLedger(n.ledgerState)
+	if err := n.chainManager.SetLedger(n.ledgerState); err != nil {
+		return fmt.Errorf("failed to configure chain security parameter: %w", err)
+	}
 
 	if n.config.barkBaseUrl != "" {
 		n.db.SetBlobStore(bark.NewBarkBlobStore(bark.BlobStoreBarkConfig{
