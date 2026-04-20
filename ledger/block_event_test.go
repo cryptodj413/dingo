@@ -15,6 +15,7 @@
 package ledger
 
 import (
+	"fmt"
 	"io"
 	"log/slog"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"github.com/blinklabs-io/dingo/chain"
 	"github.com/blinklabs-io/dingo/database/models"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/stretchr/testify/require"
 )
 
@@ -72,15 +74,16 @@ func TestEmitTransactionRollbackEvents_decodeFailureEmitsLedgerErrorPerBlock(
 	ls.emitTransactionRollbackEvents(rollbackEvt)
 
 	for i, wantSlot := range []uint64{100, 200} {
-		select {
-		case evt := <-errCh:
-			le, ok := evt.Data.(LedgerErrorEvent)
-			require.True(t, ok, "event %d type", i)
-			require.Equal(t, "rollback_tx_undo_decode", le.Operation)
-			require.Equal(t, wantSlot, le.Point.Slot)
-			require.Error(t, le.Error)
-		case <-time.After(2 * time.Second):
-			t.Fatalf("timeout waiting for ledger error event %d", i)
-		}
+		evt := testutil.RequireReceive(
+			t,
+			errCh,
+			2*time.Second,
+			fmt.Sprintf("ledger error event %d (want slot %d)", i, wantSlot),
+		)
+		le, ok := evt.Data.(LedgerErrorEvent)
+		require.True(t, ok, "event %d type", i)
+		require.Equal(t, "rollback_tx_undo_decode", le.Operation)
+		require.Equal(t, wantSlot, le.Point.Slot)
+		require.Error(t, le.Error)
 	}
 }
