@@ -349,6 +349,8 @@ func (m *Manager) captureMarkSnapshot(
 func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	start := time.Now()
 	calculator := NewCalculator(m.db)
+	successCount := uint64(0)
+	lastSuccessfulEpoch := uint64(0)
 
 	distribution, err := calculator.CalculateStakeDistribution(ctx, 0)
 	if err != nil {
@@ -433,6 +435,7 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 		}
 		return fmt.Errorf("save genesis snapshot: %w", err)
 	}
+	successCount++
 
 	// After Mithril bootstrap: seed the Mark/Set/Go window for the
 	// current epoch so leader election works immediately. Leader
@@ -461,6 +464,10 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 					seedEpoch, err,
 				)
 			}
+			successCount++
+			if seedEpoch > lastSuccessfulEpoch {
+				lastSuccessfulEpoch = seedEpoch
+			}
 			m.logger.Info(
 				"seeded post-Mithril snapshot",
 				"component", "snapshot",
@@ -479,10 +486,10 @@ func (m *Manager) CaptureGenesisSnapshot(ctx context.Context) error {
 	)
 	if m.metrics != nil {
 		m.metrics.captureDurationSeconds.Observe(time.Since(start).Seconds())
-		m.metrics.captureSuccessTotal.Inc()
+		m.metrics.captureSuccessTotal.Add(float64(successCount))
 		m.metrics.capturePoolsTotal.Set(float64(distribution.TotalPools))
 		m.metrics.captureTotalStakeLovelace.Set(float64(distribution.TotalStake))
-		m.metrics.lastSuccessfulEpoch.Set(0)
+		m.metrics.lastSuccessfulEpoch.Set(float64(lastSuccessfulEpoch))
 	}
 	return nil
 }

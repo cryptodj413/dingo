@@ -682,14 +682,11 @@ func (e *Election) computeSchedule(
 	)
 	if e.metrics != nil {
 		slotsChecked := e.epochProvider.SlotsPerEpoch()
-		slotsWon := uint64(schedule.SlotCount()) // #nosec G115 -- SlotCount() is bounded by slots-per-epoch on this network
+		slotsWon := uint64(len(schedule.LeaderSlotsSnapshot()))
 		slotsNotWon := uint64(0)
 		if slotsWon <= slotsChecked {
 			slotsNotWon = slotsChecked - slotsWon
 		}
-		e.metrics.slotChecksTotal.Add(float64(slotsChecked))
-		e.metrics.slotWonTotal.Add(float64(slotsWon))
-		e.metrics.slotNotWonTotal.Add(float64(slotsNotWon))
 		e.metrics.lastEpochSlotsChecked.Set(float64(slotsChecked))
 		e.metrics.lastEpochSlotsWon.Set(float64(slotsWon))
 		e.metrics.lastEpochSlotsNotWon.Set(float64(slotsNotWon))
@@ -772,7 +769,16 @@ func (e *Election) ShouldProduceBlock(slot uint64) bool {
 		}
 		return false
 	}
-	return schedule.IsLeaderForSlot(slot)
+	isLeader := schedule.IsLeaderForSlot(slot)
+	if e.metrics != nil {
+		e.metrics.slotChecksTotal.Inc()
+		if isLeader {
+			e.metrics.slotWonTotal.Inc()
+		} else {
+			e.metrics.slotNotWonTotal.Inc()
+		}
+	}
+	return isLeader
 }
 
 // CurrentSchedule returns the leader schedule for the current epoch, or nil.
