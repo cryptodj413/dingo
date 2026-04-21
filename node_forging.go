@@ -109,6 +109,7 @@ func (n *Node) initBlockForger(
 		n.eventBus,
 		n.config.logger,
 	)
+	election.SetPromRegistry(n.config.promRegistry)
 	if n.db != nil {
 		if scheduleStore := leader.NewSyncStateScheduleStore(
 			n.db.Metadata(),

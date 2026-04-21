@@ -327,6 +327,7 @@ func (n *Node) Run(ctx context.Context) error {
 		n.eventBus,
 		n.config.logger,
 	)
+	n.snapshotMgr.SetPromRegistry(n.config.promRegistry)
 	// Capture genesis stake snapshot (epoch 0) so leader election works at epoch 2
 	if err := n.snapshotMgr.CaptureGenesisSnapshot(ctx); err != nil {
 		n.config.logger.Warn(
