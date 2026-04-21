@@ -1,6 +1,29 @@
 # Release Notes
 
 
+## v0.36.1 (April 21, 2026)
+
+**Title:** Steadier catch-up sync and refreshed integrations
+
+**Date:** April 21, 2026
+
+**Version:** v0.36.1
+
+Hi folks! Here’s what we shipped in v0.36.1.
+
+### 💪 Improvements
+
+* Improved **catch-up sync stability:** Nodes now stay steadier while catching up because stall checks wait longer, plateau recovery allows more time, and recycle cooldowns stay longer until the node reaches tip, which reduces unnecessary connection recycling and socket churn during large syncs.
+* Updated **AWS integration currency:** AWS backed integrations stay current because the AWS SDK config package and related AWS modules were refreshed.
+* Refreshed **core AWS compatibility:** AWS integrated behavior stays aligned with upstream fixes because the core AWS SDK and `aws/smithy-go` were updated.
+* Modernized **Google API client support:** Google API client support stays current because `google.golang.org/api` now uses a newer release.
+
+### 🙏 Thank You
+
+Thank you for trying!
+
+---
+
 ## v0.36.0 (April 20, 2026)
 
 **Title:** Asset endpoints and steadier chain operations
