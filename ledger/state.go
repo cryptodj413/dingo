@@ -98,13 +98,12 @@ func DefaultDatabaseWorkerPoolConfig() DatabaseWorkerPoolConfig {
 
 // DatabaseWorkerPool manages a pool of workers for async database operations
 type DatabaseWorkerPool struct {
-	db         *database.Database
-	taskQueue  chan DatabaseOperation
-	drainQueue chan DatabaseOperation // Reference for draining after shutdown
-	shutdownCh chan struct{}
-	wg         sync.WaitGroup
-	closed     atomic.Bool // Use atomic for thread-safe access without mutex in hot path
-	mu         sync.Mutex
+	db          *database.Database
+	taskQueue   chan DatabaseOperation
+	workerWg    sync.WaitGroup // worker goroutine lifecycle
+	operationWg sync.WaitGroup // accepted operations until result is delivered
+	closed      atomic.Bool    // thread-safe without mutex in hot path
+	mu          sync.Mutex
 }
 
 // NewDatabaseWorkerPool creates a new database worker pool
@@ -121,16 +120,14 @@ func NewDatabaseWorkerPool(
 
 	taskQ := make(chan DatabaseOperation, config.TaskQueueSize)
 	pool := &DatabaseWorkerPool{
-		db:         db,
-		taskQueue:  taskQ,
-		drainQueue: taskQ,
-		shutdownCh: make(chan struct{}),
+		db:        db,
+		taskQueue: taskQ,
 		// closed is zero-valued (false) by default for atomic.Bool
 	}
 
 	// Start workers
 	for i := 0; i < config.WorkerPoolSize; i++ {
-		pool.wg.Add(1)
+		pool.workerWg.Add(1)
 		go pool.worker()
 	}
 
@@ -139,66 +136,35 @@ func NewDatabaseWorkerPool(
 
 // worker runs a single database worker
 func (p *DatabaseWorkerPool) worker() {
-	defer p.wg.Done()
+	defer p.workerWg.Done()
 
-	for {
-		select {
-		case op := <-p.taskQueue:
-			// Execute the database operation with panic protection
-			func() {
-				defer p.wg.Done()
-				result := DatabaseResult{}
-				defer func() {
-					if r := recover(); r != nil {
-						result.Error = fmt.Errorf("panic: %v", r)
-						slog.Error("worker panic during operation", "panic", r)
-					}
-					// Send result whether it's from normal execution or panic
-					if op.ResultChan != nil {
-						select {
-						case op.ResultChan <- result:
-						default:
-							// If result channel is full, skip (fire and forget)
-						}
-					}
-				}()
-				result.Error = op.OpFunc(p.db)
-			}()
-		case <-p.shutdownCh:
-			// Shutdown signal received - process any remaining operations in the queue
-			// This ensures no operations are lost during shutdown
-		drainQueueLoop:
-			for {
-				select {
-				case op := <-p.drainQueue:
-					// Process remaining operation with panic protection
-					func() {
-						defer p.wg.Done()
-						result := DatabaseResult{}
-						defer func() {
-							if r := recover(); r != nil {
-								result.Error = fmt.Errorf("panic: %v", r)
-								slog.Error("worker panic during drain operation", "panic", r)
-							}
-							// Send result whether it's from normal execution or panic
-							if op.ResultChan != nil {
-								select {
-								case op.ResultChan <- result:
-								default:
-									// Result channel is full or closed
-								}
-							}
-						}()
-						result.Error = op.OpFunc(p.db)
-					}()
-				default:
-					// Queue is empty, exit
-					break drainQueueLoop
-				}
-			}
-			return
-		}
+	for op := range p.taskQueue {
+		p.executeOperation(op)
 	}
+}
+
+func (p *DatabaseWorkerPool) executeOperation(op DatabaseOperation) {
+	defer p.operationWg.Done()
+
+	result := DatabaseResult{}
+	defer func() {
+		if r := recover(); r != nil {
+			result.Error = fmt.Errorf("panic: %v", r)
+			slog.Error("worker panic during operation", "panic", r)
+		}
+		p.sendResult(op, result)
+	}()
+	result.Error = op.OpFunc(p.db)
+}
+
+// sendResult delivers result on op.ResultChan. It blocks until send succeeds so
+// errors are not dropped when the channel is temporarily full (callers should
+// use a buffered ResultChan, e.g. cap 1, as in SubmitAsyncDBOperation).
+func (p *DatabaseWorkerPool) sendResult(op DatabaseOperation, result DatabaseResult) {
+	if op.ResultChan == nil {
+		return
+	}
+	op.ResultChan <- result
 }
 
 // Submit submits a database operation for async execution
@@ -206,32 +172,26 @@ func (p *DatabaseWorkerPool) Submit(op DatabaseOperation) {
 	p.mu.Lock()
 	if p.closed.Load() {
 		p.mu.Unlock()
-		if op.ResultChan != nil {
-			select {
-			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool is shut down")}:
-			default:
-				// If result channel is full, skip
-			}
-		}
+		p.sendResult(
+			op,
+			DatabaseResult{Error: errors.New("database worker pool is shut down")},
+		)
 		return
 	}
 
-	p.wg.Add(1)
+	p.operationWg.Add(1)
 	select {
 	case p.taskQueue <- op:
-		// Operation submitted successfully
+		p.mu.Unlock()
+		return
 	default:
-		// Queue is full - undo the Add since operation won't be queued
-		p.wg.Done()
-		if op.ResultChan != nil {
-			select {
-			case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool queue full")}:
-			default:
-				// If result channel is full, skip
-			}
-		}
+		p.operationWg.Done()
 	}
 	p.mu.Unlock()
+	p.sendResult(
+		op,
+		DatabaseResult{Error: errors.New("database worker pool queue full")},
+	)
 }
 
 // SubmitAsyncDBOperation submits a database operation for execution on the worker pool.
@@ -334,37 +294,11 @@ func (p *DatabaseWorkerPool) Shutdown() {
 		return
 	}
 	p.closed.Store(true)
-	// Store a reference to the task queue for use after unlocking.
-	// This avoids a race: we keep p.taskQueue unchanged so workers
-	// can continue reading it without synchronization, while we drain
-	// using a local reference.
-	taskQueue := p.taskQueue
+	close(p.taskQueue)
 	p.mu.Unlock()
 
-	close(p.shutdownCh)
-	p.wg.Wait()
-
-	// Drain any remaining operations from the queue and send shutdown errors
-drainLoop:
-	for {
-		select {
-		case op := <-taskQueue:
-			// Send shutdown error to the operation's result channel
-			if op.ResultChan != nil {
-				select {
-				case op.ResultChan <- DatabaseResult{Error: errors.New("database worker pool shutting down")}:
-				default:
-					// If result channel is full or closed, continue
-				}
-			}
-		default:
-			// No more operations in queue
-			break drainLoop
-		}
-	}
-
-	// Close the task queue to prevent further sends
-	close(taskQueue)
+	p.operationWg.Wait()
+	p.workerWg.Wait()
 }
 
 type ChainsyncState string

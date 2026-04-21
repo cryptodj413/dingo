@@ -40,6 +40,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	dbtypes "github.com/blinklabs-io/dingo/database/types"
 	"github.com/blinklabs-io/dingo/event"
+	"github.com/blinklabs-io/dingo/internal/test/testutil"
 	"github.com/blinklabs-io/dingo/ledger/eras"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 	"github.com/blinklabs-io/gouroboros/ledger/babbage"
@@ -1250,6 +1251,58 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 		assert.Contains(t, result.Error.Error(), "shut down")
 	case <-time.After(5 * time.Second):
 		t.Fatal("timeout waiting for error result")
+	}
+}
+
+// TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations verifies that
+// shutdown remains panic-free while operations are still queued or running.
+func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 2
+	config.TaskQueueSize = 20
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	// Barrier: workers block until release so Shutdown overlaps in-flight work.
+	hold := make(chan struct{})
+	var inFlight atomic.Int32
+
+	for range 10 {
+		resultChan := make(chan DatabaseResult, 1)
+		go func(ch chan DatabaseResult) {
+			<-ch
+		}(resultChan)
+
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				inFlight.Add(1)
+				defer inFlight.Add(-1)
+				<-hold
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+	}
+
+	testutil.WaitForCondition(
+		t,
+		func() bool { return inFlight.Load() > 0 },
+		2*time.Second,
+		"at least one operation should be running",
+	)
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		pool.Shutdown()
+		close(shutdownDone)
+	}()
+
+	close(hold)
+
+	select {
+	case <-shutdownDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for Shutdown")
 	}
 }
 
