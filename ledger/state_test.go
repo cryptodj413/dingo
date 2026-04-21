@@ -1253,6 +1253,31 @@ func TestDatabaseWorkerPoolSubmitAfterShutdown(t *testing.T) {
 	}
 }
 
+// TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations verifies that
+// shutdown remains panic-free while operations are still queued or running.
+func TestDatabaseWorkerPoolShutdownDoesNotPanicWithInFlightOperations(t *testing.T) {
+	config := DefaultDatabaseWorkerPoolConfig()
+	config.WorkerPoolSize = 2
+	config.TaskQueueSize = 20
+
+	pool := NewDatabaseWorkerPool(nil, config)
+
+	for range 10 {
+		resultChan := make(chan DatabaseResult, 1)
+		pool.Submit(DatabaseOperation{
+			OpFunc: func(db *database.Database) error {
+				time.Sleep(5 * time.Millisecond)
+				return nil
+			},
+			ResultChan: resultChan,
+		})
+	}
+
+	require.NotPanics(t, func() {
+		pool.Shutdown()
+	})
+}
+
 // TestDatabaseWorkerPoolConcurrency tests the pool under concurrent load
 func TestDatabaseWorkerPoolConcurrency(t *testing.T) {
 	config := DefaultDatabaseWorkerPoolConfig()
