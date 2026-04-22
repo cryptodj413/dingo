@@ -120,6 +120,13 @@ type Config struct {
 	reconcileInterval                    time.Duration
 	inactivityTimeout                    time.Duration
 	bootstrapPromotionMinDiversityGroups int
+	inboundWarmTarget                    int
+	inboundHotQuota                      int
+	inboundMinTenure                     time.Duration
+	inboundHotScoreThreshold             float64
+	inboundPruneAfter                    time.Duration
+	inboundDuplexOnlyForHot              bool
+	inboundCooldown                      time.Duration
 	maxConnectionsPerIP                  int
 	maxInboundConns                      int
 	genesisBootstrap                     bool
@@ -658,6 +665,28 @@ func WithInactivityTimeout(d time.Duration) ConfigOptionFunc {
 		if d > 0 {
 			c.inactivityTimeout = d
 		}
+	}
+}
+
+// WithInboundPeerGovernance specifies explicit inbound peer governance budget
+// and phase-1 policy fields. Zero values use peer governor defaults.
+func WithInboundPeerGovernance(
+	warmTarget int,
+	hotQuota int,
+	minTenure time.Duration,
+	hotScoreThreshold float64,
+	pruneAfter time.Duration,
+	duplexOnlyForHot bool,
+	cooldown time.Duration,
+) ConfigOptionFunc {
+	return func(c *Config) {
+		c.inboundWarmTarget = warmTarget
+		c.inboundHotQuota = hotQuota
+		c.inboundMinTenure = minTenure
+		c.inboundHotScoreThreshold = hotScoreThreshold
+		c.inboundPruneAfter = pruneAfter
+		c.inboundDuplexOnlyForHot = duplexOnlyForHot
+		c.inboundCooldown = cooldown
 	}
 }
 

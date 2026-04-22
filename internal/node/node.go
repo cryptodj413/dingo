@@ -305,6 +305,15 @@ func Run(cfg *config.Config, logger *slog.Logger) error {
 			dingo.WithMinHotPeers(cfg.MinHotPeers),
 			dingo.WithReconcileInterval(cfg.ReconcileInterval),
 			dingo.WithInactivityTimeout(cfg.InactivityTimeout),
+			dingo.WithInboundPeerGovernance(
+				cfg.InboundWarmTarget,
+				cfg.InboundHotQuota,
+				cfg.InboundMinTenure,
+				cfg.InboundHotScoreThreshold,
+				cfg.InboundPruneAfter,
+				cfg.InboundDuplexOnlyForHot,
+				cfg.InboundCooldown,
+			),
 			dingo.WithMaxConnectionsPerIP(cfg.MaxConnectionsPerIP),
 			dingo.WithMaxInboundConns(cfg.MaxInboundConns),
 			dingo.WithCacheConfig(

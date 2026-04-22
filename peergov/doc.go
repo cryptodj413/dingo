@@ -27,7 +27,9 @@
 // Peers progress through known → established → active tiers. Target
 // counts and per-source quotas for the active tier are configurable
 // (TargetNumberOfActivePeers, ActivePeersTopologyQuota,
-// ActivePeersGossipQuota, ActivePeersLedgerQuota).
+// ActivePeersGossipQuota, ActivePeersLedgerQuota). Inbound peers are
+// modeled as their own governed source with explicit budget controls
+// (InboundWarmTarget, InboundHotQuota) and validation policy knobs.
 //
 // # Churn
 //

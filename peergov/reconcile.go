@@ -325,25 +325,49 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 	// Collect QuotaStatusEvent with current hot peer distribution
 	hotByCategory := p.getHotPeersByCategory()
+	inboundWarm := 0
+	inboundHot := 0
+	for _, peer := range p.peers {
+		if peer == nil || peer.Source != PeerSourceInboundConn {
+			continue
+		}
+		switch peer.State {
+		case PeerStateWarm:
+			inboundWarm++
+		case PeerStateHot:
+			inboundHot++
+		}
+	}
+	otherHot := max(0, hotByCategory["other"]-inboundHot)
 	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
-		hotByCategory["ledger"] + hotByCategory["other"]
+		hotByCategory["ledger"] + inboundHot + otherHot
 	events = append(events, pendingEvent{
 		QuotaStatusEventType,
 		QuotaStatusEvent{
-			TopologyHot: hotByCategory["topology"],
-			GossipHot:   hotByCategory["gossip"],
-			LedgerHot:   hotByCategory["ledger"],
-			OtherHot:    hotByCategory["other"],
-			TotalHot:    totalHot,
+			InboundWarmTarget: p.config.InboundWarmTarget,
+			InboundHotQuota:   p.config.InboundHotQuota,
+			InboundWarm:       inboundWarm,
+			InboundHot:        inboundHot,
+			InboundPruned:     p.inboundPruned,
+			TopologyHot:       hotByCategory["topology"],
+			GossipHot:         hotByCategory["gossip"],
+			LedgerHot:         hotByCategory["ledger"],
+			OtherHot:          otherHot,
+			TotalHot:          totalHot,
 		},
 	})
 	// Log quota status for debugging
 	p.config.Logger.Debug(
 		"quota status",
+		"inbound_warm", inboundWarm,
+		"inbound_hot", inboundHot,
+		"inbound_warm_target", p.config.InboundWarmTarget,
+		"inbound_hot_quota", p.config.InboundHotQuota,
+		"inbound_pruned", p.inboundPruned,
 		"topology_hot", hotByCategory["topology"],
 		"gossip_hot", hotByCategory["gossip"],
 		"ledger_hot", hotByCategory["ledger"],
-		"other_hot", hotByCategory["other"],
+		"other_hot", otherHot,
 		"total_hot", totalHot,
 		"topology_quota", p.config.ActivePeersTopologyQuota,
 		"gossip_quota", p.config.ActivePeersGossipQuota,
@@ -536,6 +560,12 @@ func (p *PeerGovernor) enforceStateLimit(
 		removeIdx[candidate.idx] = true
 		removed++
 		*removedCount++
+		if peer.Source == PeerSourceInboundConn {
+			p.inboundPruned++
+			if p.metrics != nil {
+				p.metrics.inboundPruned.Inc()
+			}
+		}
 	}
 
 	if removed > 0 {

@@ -288,6 +288,33 @@ activePeersGossipQuota: 0
 # Active peer slots for ledger sources
 activePeersLedgerQuota: 0
 
+# Inbound peer governance budget (phase 1)
+# These define explicit operator intent for inbound peers as a governed source.
+# Current behavior remains conservative; these values are surfaced in metrics and
+# quota/status output to make inbound policy visible.
+#
+# Target number of inbound peers to keep in warm state.
+# CLI: --inbound-warm-target
+inboundWarmTarget: 0
+# Quota for inbound peers in hot state.
+# CLI: --inbound-hot-quota
+inboundHotQuota: 0
+# Minimum tenure before inbound peers are eligible for hot promotion.
+# CLI: --inbound-min-tenure
+inboundMinTenure: 0s
+# Minimum score threshold for inbound hot promotion.
+# CLI: --inbound-hot-score-threshold
+inboundHotScoreThreshold: 0
+# Future prune grace window for inbound peers.
+# CLI: --inbound-prune-after
+inboundPruneAfter: 0s
+# Future duplex policy knob for inbound peers.
+# CLI: --inbound-duplex-only-for-hot
+inboundDuplexOnlyForHot: false
+# Future cooldown knob for inbound peer governance actions.
+# CLI: --inbound-cooldown
+inboundCooldown: 0s
+
 # Genesis bootstrap configuration
 # Used only for from-origin sync. Default behavior keeps this enabled and
 # exits Genesis mode automatically near the best known peer tip.
