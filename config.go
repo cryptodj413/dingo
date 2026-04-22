@@ -669,7 +669,7 @@ func WithInactivityTimeout(d time.Duration) ConfigOptionFunc {
 }
 
 // WithInboundPeerGovernance specifies explicit inbound peer governance budget
-// and phase-1 policy fields. Zero values use peer governor defaults.
+// and phase-1 policy fields. Non-positive values use peer governor defaults.
 func WithInboundPeerGovernance(
 	warmTarget int,
 	hotQuota int,
@@ -680,13 +680,25 @@ func WithInboundPeerGovernance(
 	cooldown time.Duration,
 ) ConfigOptionFunc {
 	return func(c *Config) {
-		c.inboundWarmTarget = warmTarget
-		c.inboundHotQuota = hotQuota
-		c.inboundMinTenure = minTenure
-		c.inboundHotScoreThreshold = hotScoreThreshold
-		c.inboundPruneAfter = pruneAfter
+		if warmTarget > 0 {
+			c.inboundWarmTarget = warmTarget
+		}
+		if hotQuota > 0 {
+			c.inboundHotQuota = hotQuota
+		}
+		if minTenure > 0 {
+			c.inboundMinTenure = minTenure
+		}
+		if hotScoreThreshold > 0 {
+			c.inboundHotScoreThreshold = hotScoreThreshold
+		}
+		if pruneAfter > 0 {
+			c.inboundPruneAfter = pruneAfter
+		}
 		c.inboundDuplexOnlyForHot = duplexOnlyForHot
-		c.inboundCooldown = cooldown
+		if cooldown > 0 {
+			c.inboundCooldown = cooldown
+		}
 	}
 }
 

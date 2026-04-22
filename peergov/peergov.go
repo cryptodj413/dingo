@@ -163,11 +163,11 @@ type PeerGovernorConfig struct {
 	// Inbound peer validation configuration
 	// Inbound peers require higher scores and minimum tenure before hot promotion
 	// Inbound budget interaction policy (phase 1):
-	// - InboundWarmTarget/InboundHotQuota are explicit hard budgets
-	//   for operator visibility.
+	// - InboundWarmTarget/InboundHotQuota are explicit operator-configured
+	//   budget signals surfaced in status/metrics.
 	// - They do not spill over into topology/gossip/ledger quotas.
-	// - Promotion/pruning behavior tied to these budgets is deferred
-	//   to later phases; this phase focuses on configuration and
+	// - Active enforcement tied to these budgets is deferred to later
+	//   phases; this phase focuses on configuration and
 	//   observability surfaces only.
 	InboundWarmTarget        int           // Warm inbound budget (0 = default 10)
 	InboundHotQuota          int           // Hot inbound budget (0 = default 2)
@@ -284,22 +284,22 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 		cfg.MinScoreThreshold = defaultMinScoreThreshold
 	}
 	// Inbound peer validation defaults
-	if cfg.InboundWarmTarget == 0 {
+	if cfg.InboundWarmTarget <= 0 {
 		cfg.InboundWarmTarget = defaultInboundWarmTarget
 	}
-	if cfg.InboundHotQuota == 0 {
+	if cfg.InboundHotQuota <= 0 {
 		cfg.InboundHotQuota = defaultInboundHotQuota
 	}
-	if cfg.InboundHotScoreThreshold == 0 {
+	if cfg.InboundHotScoreThreshold <= 0 {
 		cfg.InboundHotScoreThreshold = defaultInboundHotScoreThreshold
 	}
-	if cfg.InboundMinTenure == 0 {
+	if cfg.InboundMinTenure <= 0 {
 		cfg.InboundMinTenure = defaultInboundMinTenure
 	}
-	if cfg.InboundPruneAfter == 0 {
+	if cfg.InboundPruneAfter <= 0 {
 		cfg.InboundPruneAfter = defaultInboundPruneAfter
 	}
-	if cfg.InboundCooldown == 0 {
+	if cfg.InboundCooldown <= 0 {
 		cfg.InboundCooldown = defaultInboundCooldown
 	}
 	// Bootstrap exit configuration defaults
