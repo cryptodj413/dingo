@@ -244,11 +244,18 @@ type Config struct {
 	ActivePeersLedgerQuota   int `yaml:"activePeersLedgerQuota"   envconfig:"DINGO_ACTIVE_PEERS_LEDGER_QUOTA"`
 
 	// Peer governor tuning (0 = use default)
-	MinHotPeers         int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
-	ReconcileInterval   time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
-	InactivityTimeout   time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
-	MaxConnectionsPerIP int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
-	MaxInboundConns     int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
+	MinHotPeers              int           `yaml:"minHotPeers"         envconfig:"DINGO_MIN_HOT_PEERS"`
+	ReconcileInterval        time.Duration `yaml:"reconcileInterval"   envconfig:"DINGO_RECONCILE_INTERVAL"`
+	InactivityTimeout        time.Duration `yaml:"inactivityTimeout"   envconfig:"DINGO_INACTIVITY_TIMEOUT"`
+	InboundWarmTarget        int           `yaml:"inboundWarmTarget"   envconfig:"DINGO_INBOUND_WARM_TARGET"`
+	InboundHotQuota          int           `yaml:"inboundHotQuota"     envconfig:"DINGO_INBOUND_HOT_QUOTA"`
+	InboundMinTenure         time.Duration `yaml:"inboundMinTenure"    envconfig:"DINGO_INBOUND_MIN_TENURE"`
+	InboundHotScoreThreshold float64       `yaml:"inboundHotScoreThreshold" envconfig:"DINGO_INBOUND_HOT_SCORE_THRESHOLD"`
+	InboundPruneAfter        time.Duration `yaml:"inboundPruneAfter"   envconfig:"DINGO_INBOUND_PRUNE_AFTER"`
+	InboundDuplexOnlyForHot  bool          `yaml:"inboundDuplexOnlyForHot" envconfig:"DINGO_INBOUND_DUPLEX_ONLY_FOR_HOT"`
+	InboundCooldown          time.Duration `yaml:"inboundCooldown"     envconfig:"DINGO_INBOUND_COOLDOWN"`
+	MaxConnectionsPerIP      int           `yaml:"maxConnectionsPerIP" envconfig:"DINGO_MAX_CONNECTIONS_PER_IP"`
+	MaxInboundConns          int           `yaml:"maxInboundConns"     envconfig:"DINGO_MAX_INBOUND_CONNS"`
 
 	// Cache configuration for the tiered CBOR cache system
 	Cache CacheConfig `yaml:"cache"`

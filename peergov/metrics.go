@@ -42,6 +42,12 @@ type peerGovernorMetrics struct {
 	peersBySource           *prometheus.GaugeVec   // Peers by source and state
 	churnDemotionsBySource  *prometheus.CounterVec // Churn demotions by source
 	churnPromotionsBySource *prometheus.CounterVec // Churn promotions by source
+	// Explicit inbound governance budget/usage metrics (phase 1)
+	inboundWarmTarget prometheus.Gauge
+	inboundHotQuota   prometheus.Gauge
+	inboundWarmHeld   prometheus.Gauge
+	inboundHotHeld    prometheus.Gauge
+	inboundPruned     prometheus.Counter
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -155,6 +161,26 @@ func (p *PeerGovernor) initMetrics() {
 		},
 		[]string{"source"},
 	)
+	p.metrics.inboundWarmTarget = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmTarget",
+		Help: "configured inbound warm peer target",
+	})
+	p.metrics.inboundHotQuota = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotQuota",
+		Help: "configured inbound hot peer quota",
+	})
+	p.metrics.inboundWarmHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmHeld",
+		Help: "current number of inbound peers held warm",
+	})
+	p.metrics.inboundHotHeld = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotHeld",
+		Help: "current number of inbound peers held hot",
+	})
+	p.metrics.inboundPruned = promautoFactory.NewCounter(prometheus.CounterOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundPruned",
+		Help: "total inbound peers pruned from governed sets",
+	})
 }
 
 // updatePeerMetrics updates the Prometheus metrics for peer counts.
@@ -238,4 +264,11 @@ func (p *PeerGovernor) updatePeerMetrics() {
 			float64(count),
 		)
 	}
+	// Explicit inbound budget/usage gauges
+	p.metrics.inboundWarmTarget.Set(float64(p.config.InboundWarmTarget))
+	p.metrics.inboundHotQuota.Set(float64(p.config.InboundHotQuota))
+	inboundWarm := sourceCounts[sourceStateKey{source: "inbound", state: "warm"}]
+	inboundHot := sourceCounts[sourceStateKey{source: "inbound", state: "hot"}]
+	p.metrics.inboundWarmHeld.Set(float64(inboundWarm))
+	p.metrics.inboundHotHeld.Set(float64(inboundHot))
 }

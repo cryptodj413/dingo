@@ -323,33 +323,6 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// This ensures no single source dominates the hot peer slots
 	events = append(events, p.enforcePerSourceQuotas()...)
 
-	// Collect QuotaStatusEvent with current hot peer distribution
-	hotByCategory := p.getHotPeersByCategory()
-	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
-		hotByCategory["ledger"] + hotByCategory["other"]
-	events = append(events, pendingEvent{
-		QuotaStatusEventType,
-		QuotaStatusEvent{
-			TopologyHot: hotByCategory["topology"],
-			GossipHot:   hotByCategory["gossip"],
-			LedgerHot:   hotByCategory["ledger"],
-			OtherHot:    hotByCategory["other"],
-			TotalHot:    totalHot,
-		},
-	})
-	// Log quota status for debugging
-	p.config.Logger.Debug(
-		"quota status",
-		"topology_hot", hotByCategory["topology"],
-		"gossip_hot", hotByCategory["gossip"],
-		"ledger_hot", hotByCategory["ledger"],
-		"other_hot", hotByCategory["other"],
-		"total_hot", totalHot,
-		"topology_quota", p.config.ActivePeersTopologyQuota,
-		"gossip_quota", p.config.ActivePeersGossipQuota,
-		"ledger_quota", p.config.ActivePeersLedgerQuota,
-	)
-
 	// Log valency status for topology groups
 	if debugEnabled {
 		p.logValencyStatus()
@@ -358,6 +331,63 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// Enforce overall peer targets by removing excess peers
 	// Priority order (highest to lowest): Topology > Gossip > Ledger > Inbound > Unknown
 	events = append(events, p.enforcePeerLimits(&knownRemoved)...)
+
+	// Collect QuotaStatusEvent with current hot peer distribution.
+	// This runs after enforcePeerLimits so InboundPruned and held counts
+	// reflect the final post-prune state for this reconcile cycle.
+	hotByCategory := p.getHotPeersByCategory()
+	inboundWarm := 0
+	inboundHot := 0
+	for _, peer := range p.peers {
+		if peer == nil || peer.Source != PeerSourceInboundConn {
+			continue
+		}
+		switch peer.State {
+		case PeerStateCold:
+			// Inbound cold peers are tracked via peersBySource metrics.
+		case PeerStateWarm:
+			inboundWarm++
+		case PeerStateHot:
+			inboundHot++
+		default:
+			// Unknown state should not happen; ignore for quota accounting.
+		}
+	}
+	otherHot := max(0, hotByCategory["other"]-inboundHot)
+	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
+		hotByCategory["ledger"] + inboundHot + otherHot
+	events = append(events, pendingEvent{
+		QuotaStatusEventType,
+		QuotaStatusEvent{
+			InboundWarmTarget: p.config.InboundWarmTarget,
+			InboundHotQuota:   p.config.InboundHotQuota,
+			InboundWarm:       inboundWarm,
+			InboundHot:        inboundHot,
+			InboundPruned:     p.inboundPruned,
+			TopologyHot:       hotByCategory["topology"],
+			GossipHot:         hotByCategory["gossip"],
+			LedgerHot:         hotByCategory["ledger"],
+			OtherHot:          otherHot,
+			TotalHot:          totalHot,
+		},
+	})
+	// Log quota status for debugging
+	p.config.Logger.Debug(
+		"quota status",
+		"inbound_warm", inboundWarm,
+		"inbound_hot", inboundHot,
+		"inbound_warm_target", p.config.InboundWarmTarget,
+		"inbound_hot_quota", p.config.InboundHotQuota,
+		"inbound_pruned", p.inboundPruned,
+		"topology_hot", hotByCategory["topology"],
+		"gossip_hot", hotByCategory["gossip"],
+		"ledger_hot", hotByCategory["ledger"],
+		"other_hot", otherHot,
+		"total_hot", totalHot,
+		"topology_quota", p.config.ActivePeersTopologyQuota,
+		"gossip_quota", p.config.ActivePeersGossipQuota,
+		"ledger_quota", p.config.ActivePeersLedgerQuota,
+	)
 
 	// Collect eligible peers for peer sharing
 	// Copy peer data while holding lock to avoid race conditions
@@ -536,6 +566,12 @@ func (p *PeerGovernor) enforceStateLimit(
 		removeIdx[candidate.idx] = true
 		removed++
 		*removedCount++
+		if peer.Source == PeerSourceInboundConn {
+			p.inboundPruned++
+			if p.metrics != nil {
+				p.metrics.inboundPruned.Inc()
+			}
+		}
 	}
 
 	if removed > 0 {

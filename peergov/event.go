@@ -65,13 +65,22 @@ type PeerChurnEvent struct {
 	Reason   string  // Reason for state change (gossip churn, public root churn, etc.)
 }
 
-// QuotaStatusEvent reports the current distribution of hot peers by category.
-// This is published during reconciliation to help operators monitor quota usage.
+// QuotaStatusEvent reports inbound and per-category quota posture.
+// This is published during reconciliation to help operators monitor
+// configured budgets and current usage.
 type QuotaStatusEvent struct {
+	// Configured inbound budgets (phase 1 control surface).
+	InboundWarmTarget int
+	InboundHotQuota   int
+	// Current inbound usage.
+	InboundWarm   int
+	InboundHot    int
+	InboundPruned int // Cumulative count since process start
+	// Existing active-tier category view.
 	TopologyHot int // Hot peers from topology sources (local + public roots)
 	GossipHot   int // Hot peers from gossip
 	LedgerHot   int // Hot peers from ledger
-	OtherHot    int // Hot peers from other sources (inbound, unknown)
+	OtherHot    int // Hot peers from other sources (unknown)
 	TotalHot    int // Total hot peers
 }
 
