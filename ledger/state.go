@@ -390,7 +390,8 @@ type MempoolProvider interface {
 	Transactions() []mempool.MempoolTransaction
 }
 type rollbackRecord struct {
-	slot      uint64
+	point     ocommon.Point
+	connKey   string
 	timestamp time.Time
 }
 
