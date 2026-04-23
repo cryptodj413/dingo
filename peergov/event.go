@@ -72,10 +72,19 @@ type QuotaStatusEvent struct {
 	// Configured inbound budgets (phase 1 control surface).
 	InboundWarmTarget int
 	InboundHotQuota   int
-	// Current inbound usage.
+	// Current inbound usage. InboundWarm/InboundHot exclude peers still
+	// inside the InboundProvisionalWindow so flash-connects cannot
+	// inflate reported budget usage.
 	InboundWarm   int
 	InboundHot    int
 	InboundPruned int // Cumulative count since process start
+	// Inbound admission metadata (phase 2).
+	// InboundTopologyMatched is the current number of peers whose
+	// inbound arrival was identified as a configured topology peer.
+	// InboundDuplex is the current number of inbound peers on
+	// full-duplex connections.
+	InboundTopologyMatched int
+	InboundDuplex          int
 	// Existing active-tier category view.
 	TopologyHot int // Hot peers from topology sources (local + public roots)
 	GossipHot   int // Hot peers from gossip

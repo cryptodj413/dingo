@@ -464,23 +464,22 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		return
 	}
 	address := e.RemoteAddr.String()
-	// Resolve address before acquiring lock to avoid blocking DNS
-	normalized := p.resolveAddress(address)
+	// Key on the connmanager's canonical transport identity so inbound
+	// peer entries share a key space with HasInboundPeerAddress and
+	// inboundPeerAddrs. Never DNS-resolve the inbound remote: the
+	// 4-tuple is an IP:port and calling resolveAddress would diverge
+	// from the connmanager's non-DNS normalization. When an event is
+	// synthesized in tests without a populated NormalizedRemoteAddr,
+	// fall back to NormalizePeerAddr to preserve the same contract.
+	normalized := e.NormalizedRemoteAddr
+	if normalized == "" {
+		normalized = connmanager.NormalizePeerAddr(address)
+	}
+	now := time.Now()
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
-	peerIdx := -1
-	// Check if peer already exists (possibly as inbound)
-	for i, peer := range p.peers {
-		if peer == nil {
-			continue
-		}
-		// Match by exact address or normalized address
-		if peer.Address == address || peer.NormalizedAddress == normalized {
-			peerIdx = i
-			break
-		}
-	}
+	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
@@ -495,12 +494,14 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			return
 		}
 		tmpPeer = &Peer{
-			Address:           address,
-			NormalizedAddress: normalized,
-			Source:            PeerSourceInboundConn,
-			State:             PeerStateCold,
-			EMAAlpha:          p.config.EMAAlpha,
-			FirstSeen:         time.Now(),
+			Address:            address,
+			NormalizedAddress:  normalized,
+			Source:             PeerSourceInboundConn,
+			State:              PeerStateCold,
+			EMAAlpha:           p.config.EMAAlpha,
+			FirstSeen:          now,
+			InboundArrivals:    1,
+			LastInboundArrival: now,
 		}
 		// Add inbound peer
 		p.peers = append(
@@ -509,13 +510,24 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		)
 	} else {
 		tmpPeer = p.peers[peerIdx]
-	}
-	if tmpPeer == nil {
-		p.mu.Unlock()
-		return
+		if tmpPeer == nil {
+			p.mu.Unlock()
+			return
+		}
+		tmpPeer.InboundArrivals++
+		tmpPeer.LastInboundArrival = now
+		// Record the topology identity once on first rule-2 match and
+		// keep it across subsequent reconnects. Rule-1 matches yield
+		// topologyGroupID == "" and must not clear a prior match.
+		if topologyGroupID != "" && tmpPeer.InboundTopologyMatch == "" {
+			tmpPeer.InboundTopologyMatch = topologyGroupID
+		}
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
+	// Accept the event-embedded duplex hint as a provisional value; the
+	// connmanager lookup below is authoritative when present.
+	tmpPeer.InboundDuplex = e.IsDuplex
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
@@ -523,6 +535,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			if tmpPeer.Connection != nil {
 				tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 				tmpPeer.State = PeerStateWarm
+				// setConnection derives IsClient from live handshake
+				// data; prefer it over the event hint when available.
+				tmpPeer.InboundDuplex = tmpPeer.Connection.IsClient
 			}
 		}
 	}
@@ -541,6 +556,9 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 		oldConn,
 		tmpPeer,
 	)
+	if p.metrics != nil {
+		p.metrics.inboundArrivalsTotal.Inc()
+	}
 	p.updatePeerMetrics()
 	p.mu.Unlock()
 

@@ -125,6 +125,31 @@ type Peer struct {
 	WarmValency uint
 	// GroupID identifies the topology group this peer belongs to (for valency tracking)
 	GroupID string
+
+	// Inbound admission metadata (phase 2). These fields are only
+	// populated on inbound arrivals, but they live on every Peer so that
+	// a configured topology peer that an inbound matched to can record
+	// duplex/arrival information without losing its topology identity.
+
+	// InboundDuplex reports whether the most recent inbound connection
+	// for this peer negotiated InitiatorAndResponder. It is distinct
+	// from Connection.IsClient because it is retained across brief
+	// reconnects within the provisional window.
+	InboundDuplex bool
+	// InboundArrivals is the number of distinct inbound connection
+	// events observed for this peer identity since the process started.
+	// A value > 1 indicates a repeat arrival (the peer was already
+	// known when the event fired).
+	InboundArrivals uint32
+	// LastInboundArrival is the wall-clock time of the most recent
+	// inbound connection event matched to this peer.
+	LastInboundArrival time.Time
+	// InboundTopologyMatch records the GroupID of the configured
+	// topology peer that an inbound arrival was identified as, via the
+	// safe host-match rule in resolveInboundIdentity. Empty when no
+	// topology match was made. Set once on arrival and not cleared on
+	// subsequent reconnects.
+	InboundTopologyMatch string
 }
 
 func (p *Peer) setConnection(conn *ouroboros.Connection, outbound bool) {

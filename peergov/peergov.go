@@ -66,6 +66,13 @@ const (
 	defaultInboundPruneAfter        = 15 * time.Minute
 	defaultInboundDuplexOnlyForHot  = false
 	defaultInboundCooldown          = 5 * time.Minute
+	// defaultInboundProvisionalWindow is the grace period during which a
+	// freshly-arrived inbound peer is not counted toward the inbound
+	// warm/hot budgets. It filters half-opens and scanner traffic
+	// without hiding real peers. Chosen to sit above typical TCP RTT
+	// noise but well below the Prometheus scrape cadence, so short-lived
+	// connections do not cause visible metric oscillation.
+	defaultInboundProvisionalWindow = 3 * time.Second
 
 	// Default bootstrap exit configuration
 	defaultMinLedgerPeersForExit                = 5
@@ -176,6 +183,12 @@ type PeerGovernorConfig struct {
 	InboundPruneAfter        time.Duration // Future prune grace (0 = default 15min)
 	InboundDuplexOnlyForHot  bool          // Future duplex policy (default false)
 	InboundCooldown          time.Duration // Future cooldown between churn actions (0 = default 5min)
+	// InboundProvisionalWindow is the grace duration a fresh inbound
+	// peer is excluded from InboundWarm/InboundHot budget counts, so a
+	// burst of half-open connects cannot inflate observed usage.
+	// 0 selects defaultInboundProvisionalWindow; set to a negative
+	// value to disable the filter entirely.
+	InboundProvisionalWindow time.Duration
 
 	// Bootstrap peer exit configuration
 	// Bootstrap peers are used during initial sync but should be exited once
@@ -301,6 +314,11 @@ func NewPeerGovernor(cfg PeerGovernorConfig) *PeerGovernor {
 	}
 	if cfg.InboundCooldown <= 0 {
 		cfg.InboundCooldown = defaultInboundCooldown
+	}
+	// InboundProvisionalWindow: 0 means use default; negative means
+	// disabled (no grace period applied to budget counting).
+	if cfg.InboundProvisionalWindow == 0 {
+		cfg.InboundProvisionalWindow = defaultInboundProvisionalWindow
 	}
 	// Bootstrap exit configuration defaults
 	if cfg.MinLedgerPeersForExit == 0 {

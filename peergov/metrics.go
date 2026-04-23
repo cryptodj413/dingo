@@ -15,6 +15,8 @@
 package peergov
 
 import (
+	"time"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
@@ -48,6 +50,10 @@ type peerGovernorMetrics struct {
 	inboundWarmHeld   prometheus.Gauge
 	inboundHotHeld    prometheus.Gauge
 	inboundPruned     prometheus.Counter
+	// Inbound admission metadata metrics (phase 2)
+	inboundArrivalsTotal   prometheus.Counter
+	inboundTopologyMatched prometheus.Gauge
+	inboundDuplexHeld      prometheus.Gauge
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -181,6 +187,80 @@ func (p *PeerGovernor) initMetrics() {
 		Name: "cardano_node_metrics_peerSelection_InboundPruned",
 		Help: "total inbound peers pruned from governed sets",
 	})
+	p.metrics.inboundArrivalsTotal = promautoFactory.NewCounter(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundArrivalsTotal",
+			Help: "total inbound connection events observed since startup (includes re-arrivals)",
+		},
+	)
+	p.metrics.inboundTopologyMatched = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundTopologyMatched",
+			Help: "current number of peers whose inbound arrival was identified as a configured topology peer",
+		},
+	)
+	p.metrics.inboundDuplexHeld = promautoFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundDuplexHeld",
+			Help: "current number of inbound peers on full-duplex connections",
+		},
+	)
+}
+
+// inboundCounts is the phase-2 census of inbound peers used to populate
+// both Prometheus metrics and QuotaStatusEvent. Centralizing this avoids
+// drift between the two surfaces.
+type inboundCounts struct {
+	// Warm and Hot are provisional-window-filtered budget counts: peers
+	// younger than InboundProvisionalWindow are excluded.
+	Warm int
+	Hot  int
+	// TopologyMatched is the count of peers with a non-empty
+	// InboundTopologyMatch.
+	TopologyMatched int
+	// Duplex is the count of peers with InboundDuplex set.
+	Duplex int
+}
+
+// censusInboundCounts computes the phase-2 inbound census. Must be
+// called with p.mu held.
+func (p *PeerGovernor) censusInboundCounts() inboundCounts {
+	var c inboundCounts
+	now := time.Now()
+	window := p.config.InboundProvisionalWindow
+	for _, peer := range p.peers {
+		if peer == nil {
+			continue
+		}
+		if peer.InboundTopologyMatch != "" {
+			c.TopologyMatched++
+		}
+		if peer.Source != PeerSourceInboundConn {
+			// Topology peers that inbound-matched still govern through
+			// their configured source, so they are not charged against
+			// the inbound budget. They do count toward topology-match
+			// observability above.
+			continue
+		}
+		if peer.InboundDuplex {
+			c.Duplex++
+		}
+		// Provisional-window filter: a negative window disables the
+		// grace, zero is normalized to the default in NewPeerGovernor.
+		if window > 0 && !peer.FirstSeen.IsZero() &&
+			now.Sub(peer.FirstSeen) < window {
+			continue
+		}
+		switch peer.State {
+		case PeerStateCold:
+			// Cold inbound peers do not hold a slot in either budget.
+		case PeerStateWarm:
+			c.Warm++
+		case PeerStateHot:
+			c.Hot++
+		}
+	}
+	return c
 }
 
 // updatePeerMetrics updates the Prometheus metrics for peer counts.
@@ -264,11 +344,14 @@ func (p *PeerGovernor) updatePeerMetrics() {
 			float64(count),
 		)
 	}
-	// Explicit inbound budget/usage gauges
+	// Explicit inbound budget/usage gauges. Use the provisional-window
+	// filter so flash-connects cannot inflate reported usage; phase 3
+	// enforcement will read the same filtered view.
 	p.metrics.inboundWarmTarget.Set(float64(p.config.InboundWarmTarget))
 	p.metrics.inboundHotQuota.Set(float64(p.config.InboundHotQuota))
-	inboundWarm := sourceCounts[sourceStateKey{source: "inbound", state: "warm"}]
-	inboundHot := sourceCounts[sourceStateKey{source: "inbound", state: "hot"}]
-	p.metrics.inboundWarmHeld.Set(float64(inboundWarm))
-	p.metrics.inboundHotHeld.Set(float64(inboundHot))
+	census := p.censusInboundCounts()
+	p.metrics.inboundWarmHeld.Set(float64(census.Warm))
+	p.metrics.inboundHotHeld.Set(float64(census.Hot))
+	p.metrics.inboundTopologyMatched.Set(float64(census.TopologyMatched))
+	p.metrics.inboundDuplexHeld.Set(float64(census.Duplex))
 }
