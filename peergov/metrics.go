@@ -235,15 +235,16 @@ func (p *PeerGovernor) censusInboundCounts() inboundCounts {
 		if peer.InboundTopologyMatch != "" {
 			c.TopologyMatched++
 		}
+		if peer.InboundDuplex {
+			c.Duplex++
+		}
 		if peer.Source != PeerSourceInboundConn {
 			// Topology peers that inbound-matched still govern through
 			// their configured source, so they are not charged against
 			// the inbound budget. They do count toward topology-match
-			// observability above.
+			// observability above. Duplex capability is still included in
+			// the shared census above.
 			continue
-		}
-		if peer.InboundDuplex {
-			c.Duplex++
 		}
 		// Provisional-window filter: a negative window disables the
 		// grace, zero is normalized to the default in NewPeerGovernor.

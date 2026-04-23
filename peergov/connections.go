@@ -525,9 +525,12 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
-	// Accept the event-embedded duplex hint as a provisional value; the
-	// connmanager lookup below is authoritative when present.
-	tmpPeer.InboundDuplex = e.IsDuplex
+	// Accept an event-embedded duplex=true hint as a provisional upgrade;
+	// do not clear a previously known true value on best-effort false.
+	// The connmanager lookup below is authoritative when present.
+	if e.IsDuplex {
+		tmpPeer.InboundDuplex = true
+	}
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
