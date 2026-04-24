@@ -5826,3 +5826,663 @@ func TestAddLedgerPeer_AcceptsRoutable(t *testing.T) {
 	assert.True(t, added)
 	assert.Len(t, pg.GetPeers(), 1)
 }
+
+// --- Phase 2: inbound admission metadata & identity ---------------------
+
+// seedTopologyPeer appends a topology-sourced peer directly to the
+// governor state. It avoids AddPeer's DNS path so the NormalizedAddress
+// field is deterministic in tests.
+func seedTopologyPeer(
+	pg *PeerGovernor,
+	addr, normalized, groupID string,
+	source PeerSource,
+) {
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           addr,
+		NormalizedAddress: normalized,
+		Source:            source,
+		State:             PeerStateCold,
+		GroupID:           groupID,
+		FirstSeen:         time.Now(),
+	})
+}
+
+func TestResolveInboundIdentity(t *testing.T) {
+	type seed struct {
+		addr       string
+		normalized string
+		source     PeerSource
+		groupID    string
+	}
+	tests := []struct {
+		name            string
+		seeds           []seed
+		inboundAddr     string
+		wantIdx         int
+		wantTopologyGID string
+	}{
+		{
+			name: "exact-address match returns existing peer",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceP2PGossip,
+				},
+			},
+			inboundAddr: "44.0.0.1:3001",
+			wantIdx:     0,
+		},
+		{
+			name: "normalized-address match returns existing peer",
+			seeds: []seed{
+				{
+					addr:       "relay.example.com:3001",
+					normalized: "44.0.0.1:3001",
+					source:     PeerSourceP2PLedger,
+				},
+			},
+			inboundAddr: "44.0.0.1:3001",
+			wantIdx:     0,
+		},
+		{
+			name: "operator pattern — topology peer, ephemeral source port",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+			},
+			inboundAddr:     "44.0.0.1:51432",
+			wantIdx:         0,
+			wantTopologyGID: "local-root-0",
+		},
+		{
+			name: "ambiguous host — two topology peers on same host → no match",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+				{
+					addr: "44.0.0.1:3002", normalized: "44.0.0.1:3002",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-1",
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
+		},
+		{
+			name: "gossip peer sharing host does not widen identity",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceP2PGossip,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
+		},
+		{
+			name: "ledger peer sharing host does not widen identity",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceP2PLedger,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
+		},
+		{
+			name:        "no peers — no match",
+			seeds:       nil,
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
+		},
+		{
+			name: "topology peer with DNS-unresolved normalized address — no host match",
+			seeds: []seed{
+				// DNS failed during topology load, NormalizedAddress is
+				// still a hostname. The inbound arrives as an IP; we
+				// deliberately do not re-do DNS during admission, so
+				// no rule-2 match.
+				{
+					addr:       "relay.example.com:3001",
+					normalized: "relay.example.com:3001",
+					source:     PeerSourceTopologyPublicRoot,
+					groupID:    "public-root-0",
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     -1,
+		},
+		{
+			name: "IPv6 topology host match",
+			seeds: []seed{
+				{
+					addr: "[2001:db8::1]:3001", normalized: "[2001:db8::1]:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+			},
+			inboundAddr:     "[2001:db8::1]:51432",
+			wantIdx:         0,
+			wantTopologyGID: "local-root-0",
+		},
+		{
+			name: "exact match takes priority over topology host",
+			seeds: []seed{
+				// Topology peer that could also match via rule 2.
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+				// Existing inbound at the exact source port.
+				{
+					addr: "44.0.0.1:51432", normalized: "44.0.0.1:51432",
+					source: PeerSourceInboundConn,
+				},
+			},
+			inboundAddr: "44.0.0.1:51432",
+			wantIdx:     1, // exact match wins; topology index is 0
+		},
+		{
+			// Regression: rule 1 against a topology peer must still
+			// classify as a topology match. Otherwise an operator-
+			// configured peer that connects from its listener port
+			// would be indistinguishable from a random inbound.
+			name: "rule-1 exact match against topology peer yields GroupID",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceTopologyLocalRoot, groupID: "local-root-0",
+				},
+			},
+			inboundAddr:     "44.0.0.1:3001",
+			wantIdx:         0,
+			wantTopologyGID: "local-root-0",
+		},
+		{
+			// Rule 1 against a non-topology peer must not fabricate a
+			// topology classification.
+			name: "rule-1 exact match against gossip peer yields no GroupID",
+			seeds: []seed{
+				{
+					addr: "44.0.0.1:3001", normalized: "44.0.0.1:3001",
+					source: PeerSourceP2PGossip,
+				},
+			},
+			inboundAddr: "44.0.0.1:3001",
+			wantIdx:     0,
+			// wantTopologyGID zero value ""
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			for _, s := range tc.seeds {
+				seedTopologyPeer(pg, s.addr, s.normalized, s.groupID, s.source)
+			}
+			// Use the connmanager canonical normalizer, matching
+			// what handleInboundConnectionEvent does in production.
+			normalized := connmanager.NormalizePeerAddr(tc.inboundAddr)
+			pg.mu.Lock()
+			idx, gid := pg.resolveInboundIdentity(tc.inboundAddr, normalized)
+			pg.mu.Unlock()
+			assert.Equal(t, tc.wantIdx, idx, "peer index")
+			assert.Equal(t, tc.wantTopologyGID, gid, "topology group id")
+		})
+	}
+}
+
+// TestResolveInboundIdentity_CanonicalKeyParity pins the invariant that
+// peergov's inbound admission keys on the same canonical form the
+// connmanager publishes, so inbound-peer-address lookups remain
+// symmetric across both layers.
+func TestResolveInboundIdentity_CanonicalKeyParity(t *testing.T) {
+	cases := []string{
+		"44.0.0.1:3001",
+		"[2001:0db8::1]:3001",
+		"[::ffff:1.2.3.4]:3001",
+	}
+	for _, addr := range cases {
+		t.Run(addr, func(t *testing.T) {
+			// connmanager canonicalization must equal peergov's
+			// lock-safe address normalization for IP:port inputs; any
+			// drift would cause inbound-peer lookups to miss.
+			pg := NewPeerGovernor(PeerGovernorConfig{
+				Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+			})
+			assert.Equal(t,
+				connmanager.NormalizePeerAddr(addr),
+				pg.normalizeAddress(addr),
+				"normalization must agree for IP:port transport identities",
+			)
+		})
+	}
+}
+
+func TestHandleInboundConnection_TopologyHostMatch(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	seedTopologyPeer(
+		pg,
+		"44.0.0.1:3001",
+		"44.0.0.1:3001",
+		"local-root-0",
+		PeerSourceTopologyLocalRoot,
+	)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+			IsDuplex:             true,
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1, "inbound must attach to topology peer, not spawn new")
+	peer := peers[0]
+	assert.Equal(t, "44.0.0.1:3001", peer.Address,
+		"topology address must be preserved — do not rewrite with ephemeral port")
+	assert.Equal(t, PeerSource(PeerSourceTopologyLocalRoot), peer.Source,
+		"source must remain topology; inbound does not downgrade identity")
+	assert.Equal(t, "local-root-0", peer.InboundTopologyMatch,
+		"matched topology GroupID must be recorded")
+	assert.Equal(t, uint32(1), peer.InboundArrivals)
+	assert.False(t, peer.LastInboundArrival.IsZero())
+	assert.True(t, peer.InboundDuplex,
+		"event-carried IsDuplex must be recorded when no connmanager is wired")
+}
+
+func TestHandleInboundConnection_AmbiguousHostCreatesNewPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	seedTopologyPeer(
+		pg, "44.0.0.1:3002", "44.0.0.1:3002",
+		"local-root-1", PeerSourceTopologyLocalRoot,
+	)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 3,
+		"ambiguous host must not merge distinct configured peers")
+	// Find the new inbound peer; it must not have inherited either GroupID.
+	var foundInbound bool
+	for _, peer := range peers {
+		if peer.Source == PeerSourceInboundConn {
+			foundInbound = true
+			assert.Equal(t, "44.0.0.1:51432", peer.Address)
+			assert.Empty(t, peer.InboundTopologyMatch,
+				"ambiguous host must not produce a topology match")
+		}
+	}
+	assert.True(t, foundInbound, "new inbound peer must be created")
+}
+
+func TestHandleInboundConnection_ReArrivalIncrementsArrivals(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	evt := event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteAddr,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		},
+	}
+	pg.handleInboundConnectionEvent(evt)
+	first := pg.GetPeers()
+	require.Len(t, first, 1)
+	firstSeen := first[0].FirstSeen
+	firstArrival := first[0].LastInboundArrival
+	require.Equal(t, uint32(1), first[0].InboundArrivals)
+
+	// Small real delay so the monotonic component advances; we only
+	// need LastInboundArrival to strictly increase, which time.Now()
+	// guarantees on the next call under Go's monotonic clock.
+	pg.handleInboundConnectionEvent(evt)
+	second := pg.GetPeers()
+	require.Len(t, second, 1, "re-arrival must not spawn a second peer entry")
+	assert.Equal(t, uint32(2), second[0].InboundArrivals)
+	assert.Equal(t, firstSeen, second[0].FirstSeen,
+		"FirstSeen must not move on re-arrival")
+	assert.False(t, second[0].LastInboundArrival.Before(firstArrival),
+		"LastInboundArrival must not go backwards")
+}
+
+func TestHandleInboundConnection_TopologyMatchPersistsOnReArrival(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	seedTopologyPeer(
+		pg, "44.0.0.1:3001", "44.0.0.1:3001",
+		"local-root-0", PeerSourceTopologyLocalRoot,
+	)
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+
+	// First arrival via ephemeral port — rule 2 records the match.
+	ephemeralAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: ephemeralAddr,
+			},
+			LocalAddr: localAddr, RemoteAddr: ephemeralAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(ephemeralAddr.String()),
+		},
+	})
+	require.Equal(t, "local-root-0", pg.GetPeers()[0].InboundTopologyMatch)
+
+	// Second arrival at the configured port — rule 1 now classifies
+	// this as a topology match too (the matched peer is topology-
+	// sourced). The recorded match must remain the same GroupID.
+	configuredAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:3001")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: configuredAddr,
+			},
+			LocalAddr: localAddr, RemoteAddr: configuredAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(configuredAddr.String()),
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, "local-root-0", peers[0].InboundTopologyMatch,
+		"rule-1 re-arrival must not clobber the existing topology match")
+	assert.Equal(t, uint32(2), peers[0].InboundArrivals)
+}
+
+// TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival
+// exercises the write guard in the caller: a non-topology rule-1
+// re-arrival (e.g. a pre-existing inbound entry the event later
+// attaches to) must not clear a previously-recorded topology match.
+// Synthetic: we directly mutate the peer list to simulate the state
+// that phase 3 pruning could produce.
+func TestHandleInboundConnection_TopologyMatchNotClearedByUnrelatedReArrival(
+	t *testing.T,
+) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	// Seed an inbound peer that was previously topology-matched.
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:              "44.0.0.1:51432",
+		NormalizedAddress:    "44.0.0.1:51432",
+		Source:               PeerSourceInboundConn,
+		State:                PeerStateWarm,
+		FirstSeen:            time.Now().Add(-time.Hour),
+		InboundArrivals:      1,
+		InboundTopologyMatch: "local-root-0",
+	})
+	pg.mu.Unlock()
+
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			},
+			LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t, "local-root-0", peers[0].InboundTopologyMatch,
+		"re-arrival against a non-topology existing entry must not clear match")
+	assert.Equal(t, uint32(2), peers[0].InboundArrivals)
+}
+
+func TestInboundProvisionalWindow_ExcludesFreshFromCounts(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                 newMockEventBus(),
+		PromRegistry:             reg,
+		InboundProvisionalWindow: time.Hour, // effectively always provisional
+	})
+	// Seed a warm inbound peer that is younger than the window.
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.1:51432",
+		NormalizedAddress: "44.0.0.1:51432",
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateWarm,
+		FirstSeen:         time.Now(),
+	})
+	census := pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 0, census.Warm, "fresh inbound must not count toward warm budget")
+	assert.Equal(t, 0, census.Hot)
+
+	// Disable the window and re-check.
+	pg.config.InboundProvisionalWindow = -1
+	pg.mu.Lock()
+	census = pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 1, census.Warm,
+		"disabling the window must include the peer in warm count")
+}
+
+func TestInboundProvisionalWindow_IncludesAfterWindow(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:                 newMockEventBus(),
+		PromRegistry:             prometheus.NewRegistry(),
+		InboundProvisionalWindow: time.Millisecond,
+	})
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.1:51432",
+		NormalizedAddress: "44.0.0.1:51432",
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateHot,
+		FirstSeen:         time.Now().Add(-time.Hour),
+	})
+	census := pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 1, census.Hot,
+		"peer older than window must be counted")
+}
+
+func TestHandleInboundConnection_InboundDuplexFromEvent(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			},
+			LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteAddr.String()),
+			IsDuplex:             true,
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.True(t, peers[0].InboundDuplex,
+		"event-derived duplex hint must be retained when connmanager is nil")
+}
+
+func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.1:51432",
+		NormalizedAddress: "44.0.0.1:51432",
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateWarm,
+		FirstSeen:         time.Now().Add(-time.Hour),
+		InboundDuplex:     true,
+		InboundArrivals:   1,
+	})
+	census := pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 0, census.Duplex,
+		"duplex count must not include peers without a live connection")
+
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	census = pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 1, census.Duplex,
+		"duplex count must include live client-capable inbound peers")
+}
+
+func TestHandleConnectionClosedEvent_DuplexCensusDropsOnClose(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           remoteAddr.String(),
+		NormalizedAddress: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateWarm,
+		FirstSeen:         time.Now().Add(-time.Hour),
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+		InboundDuplex:   true,
+		InboundArrivals: 1,
+	})
+	require.Equal(t, 1, pg.censusInboundCounts().Duplex)
+	pg.mu.Unlock()
+
+	pg.handleConnectionClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+		},
+	})
+
+	pg.mu.Lock()
+	assert.Equal(t, 0, pg.censusInboundCounts().Duplex,
+		"duplex count must drop after the inbound connection closes")
+	pg.mu.Unlock()
+}
+
+// TestHandleInboundConnection_NormalizedRemoteAddrFallback exercises
+// the fallback path: when the event arrives without a populated
+// NormalizedRemoteAddr (e.g. from subscribers that predate the field),
+// peergov still keys on the connmanager canonical form by calling
+// NormalizePeerAddr itself. The resulting peer must be identical to
+// the one produced when the event carries the field.
+func TestHandleInboundConnection_NormalizedRemoteAddrFallback(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	// RemoteAddr deliberately constructed so (*net.TCPAddr).String()
+	// differs case-only from its canonical form — an IPv6 address with
+	// extra leading zeros — to make sure the fallback actually
+	// normalizes rather than copying through verbatim.
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "[2001:0db8::1]:51432")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			},
+			LocalAddr: localAddr, RemoteAddr: remoteAddr,
+			// NormalizedRemoteAddr intentionally unset.
+		},
+	})
+	peers := pg.GetPeers()
+	require.Len(t, peers, 1)
+	assert.Equal(t,
+		connmanager.NormalizePeerAddr(remoteAddr.String()),
+		peers[0].NormalizedAddress,
+		"fallback must produce the canonical connmanager key",
+	)
+}
+
+func TestAddressHost(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"44.0.0.1:3001", "44.0.0.1"},
+		{"[2001:db8::1]:3001", "2001:db8::1"},
+		{"[::ffff:1.2.3.4]:3001", "1.2.3.4"},
+		{"Relay.Example.COM:3001", "relay.example.com"},
+		{"bogus", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			assert.Equal(t, tc.want, addressHost(tc.in))
+		})
+	}
+}

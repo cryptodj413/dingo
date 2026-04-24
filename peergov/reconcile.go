@@ -336,49 +336,42 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 	// This runs after enforcePeerLimits so InboundPruned and held counts
 	// reflect the final post-prune state for this reconcile cycle.
 	hotByCategory := p.getHotPeersByCategory()
-	inboundWarm := 0
-	inboundHot := 0
-	for _, peer := range p.peers {
-		if peer == nil || peer.Source != PeerSourceInboundConn {
-			continue
-		}
-		switch peer.State {
-		case PeerStateCold:
-			// Inbound cold peers are tracked via peersBySource metrics.
-		case PeerStateWarm:
-			inboundWarm++
-		case PeerStateHot:
-			inboundHot++
-		default:
-			// Unknown state should not happen; ignore for quota accounting.
-		}
-	}
-	otherHot := max(0, hotByCategory["other"]-inboundHot)
+	// censusInboundCounts applies the provisional-window filter so the
+	// event agrees with the Prometheus gauges.
+	census := p.censusInboundCounts()
+	// hotByCategory["other"] still includes inbound hot peers, so
+	// subtract the filtered inbound hot count rather than the raw one
+	// to keep TotalHot self-consistent with the event fields.
+	otherHot := max(0, hotByCategory["other"]-census.Hot)
 	totalHot := hotByCategory["topology"] + hotByCategory["gossip"] +
-		hotByCategory["ledger"] + inboundHot + otherHot
+		hotByCategory["ledger"] + census.Hot + otherHot
 	events = append(events, pendingEvent{
 		QuotaStatusEventType,
 		QuotaStatusEvent{
-			InboundWarmTarget: p.config.InboundWarmTarget,
-			InboundHotQuota:   p.config.InboundHotQuota,
-			InboundWarm:       inboundWarm,
-			InboundHot:        inboundHot,
-			InboundPruned:     p.inboundPruned,
-			TopologyHot:       hotByCategory["topology"],
-			GossipHot:         hotByCategory["gossip"],
-			LedgerHot:         hotByCategory["ledger"],
-			OtherHot:          otherHot,
-			TotalHot:          totalHot,
+			InboundWarmTarget:      p.config.InboundWarmTarget,
+			InboundHotQuota:        p.config.InboundHotQuota,
+			InboundWarm:            census.Warm,
+			InboundHot:             census.Hot,
+			InboundPruned:          p.inboundPruned,
+			InboundTopologyMatched: census.TopologyMatched,
+			InboundDuplex:          census.Duplex,
+			TopologyHot:            hotByCategory["topology"],
+			GossipHot:              hotByCategory["gossip"],
+			LedgerHot:              hotByCategory["ledger"],
+			OtherHot:               otherHot,
+			TotalHot:               totalHot,
 		},
 	})
 	// Log quota status for debugging
 	p.config.Logger.Debug(
 		"quota status",
-		"inbound_warm", inboundWarm,
-		"inbound_hot", inboundHot,
+		"inbound_warm", census.Warm,
+		"inbound_hot", census.Hot,
 		"inbound_warm_target", p.config.InboundWarmTarget,
 		"inbound_hot_quota", p.config.InboundHotQuota,
 		"inbound_pruned", p.inboundPruned,
+		"inbound_topology_matched", census.TopologyMatched,
+		"inbound_duplex", census.Duplex,
 		"topology_hot", hotByCategory["topology"],
 		"gossip_hot", hotByCategory["gossip"],
 		"ledger_hot", hotByCategory["ledger"],
