@@ -218,8 +218,8 @@ type inboundCounts struct {
 	// TopologyMatched is the count of peers with a non-empty
 	// InboundTopologyMatch.
 	TopologyMatched int
-	// Duplex is the count of peers with a currently-live client-capable
-	// connection and inbound-arrival metadata.
+	// Duplex is the count of peers with a currently-live inbound
+	// client-capable connection.
 	Duplex int
 }
 
@@ -236,10 +236,18 @@ func (p *PeerGovernor) censusInboundCounts() inboundCounts {
 		if peer.InboundTopologyMatch != "" {
 			c.TopologyMatched++
 		}
-		if peer.Connection != nil &&
-			peer.Connection.IsClient &&
-			(peer.InboundDuplex || peer.InboundArrivals > 0) {
-			c.Duplex++
+		if peer.Connection != nil && peer.Connection.IsClient {
+			// "Current inbound duplex" must be derived from live transport
+			// direction, not sticky arrival metadata.
+			isLiveInbound := peer.Source == PeerSourceInboundConn
+			if p.config.ConnManager != nil {
+				isLiveInbound = p.config.ConnManager.IsInboundConnection(
+					peer.Connection.Id,
+				)
+			}
+			if isLiveInbound {
+				c.Duplex++
+			}
 		}
 		if peer.Source != PeerSourceInboundConn {
 			// Topology peers that inbound-matched still govern through
