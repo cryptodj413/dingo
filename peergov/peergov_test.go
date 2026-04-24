@@ -6362,6 +6362,77 @@ func TestHandleInboundConnection_InboundDuplexFromEvent(t *testing.T) {
 		"event-derived duplex hint must be retained when connmanager is nil")
 }
 
+func TestCensusInboundCounts_DuplexRequiresLiveConnection(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           "44.0.0.1:51432",
+		NormalizedAddress: "44.0.0.1:51432",
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateWarm,
+		FirstSeen:         time.Now().Add(-time.Hour),
+		InboundDuplex:     true,
+		InboundArrivals:   1,
+	})
+	census := pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 0, census.Duplex,
+		"duplex count must not include peers without a live connection")
+
+	pg.mu.Lock()
+	pg.peers[0].Connection = &PeerConnection{IsClient: true}
+	census = pg.censusInboundCounts()
+	pg.mu.Unlock()
+	assert.Equal(t, 1, census.Duplex,
+		"duplex count must include live client-capable inbound peers")
+}
+
+func TestHandleConnectionClosedEvent_DuplexCensusDropsOnClose(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:       slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		EventBus:     newMockEventBus(),
+		PromRegistry: prometheus.NewRegistry(),
+	})
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.1:51432")
+	connId := ouroboros.ConnectionId{
+		LocalAddr:  localAddr,
+		RemoteAddr: remoteAddr,
+	}
+	pg.mu.Lock()
+	pg.peers = append(pg.peers, &Peer{
+		Address:           remoteAddr.String(),
+		NormalizedAddress: connmanager.NormalizePeerAddr(remoteAddr.String()),
+		Source:            PeerSourceInboundConn,
+		State:             PeerStateWarm,
+		FirstSeen:         time.Now().Add(-time.Hour),
+		Connection: &PeerConnection{
+			Id:       connId,
+			IsClient: true,
+		},
+		InboundDuplex:   true,
+		InboundArrivals: 1,
+	})
+	require.Equal(t, 1, pg.censusInboundCounts().Duplex)
+	pg.mu.Unlock()
+
+	pg.handleConnectionClosedEvent(event.Event{
+		Type: connmanager.ConnectionClosedEventType,
+		Data: connmanager.ConnectionClosedEvent{
+			ConnectionId: connId,
+		},
+	})
+
+	pg.mu.Lock()
+	assert.Equal(t, 0, pg.censusInboundCounts().Duplex,
+		"duplex count must drop after the inbound connection closes")
+	pg.mu.Unlock()
+}
+
 // TestHandleInboundConnection_NormalizedRemoteAddrFallback exercises
 // the fallback path: when the event arrives without a populated
 // NormalizedRemoteAddr (e.g. from subscribers that predate the field),

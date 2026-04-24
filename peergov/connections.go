@@ -525,6 +525,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	}
 	oldSource := tmpPeer.Source
 	oldConn := clonePeerConnection(tmpPeer.Connection)
+	hadClientConnection := tmpPeer.hasClientConnection()
 	// Accept an event-embedded duplex=true hint as a provisional upgrade;
 	// do not clear a previously known true value on best-effort false.
 	// The connmanager lookup below is authoritative when present.
@@ -534,14 +535,21 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
-			tmpPeer.setConnection(conn, false)
-			if tmpPeer.Connection != nil {
-				tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
-				tmpPeer.State = PeerStateWarm
-				// setConnection derives IsClient from live handshake
-				// data; prefer it over the event hint when available.
-				tmpPeer.InboundDuplex = tmpPeer.Connection.IsClient
+			inboundPeerConn := &Peer{}
+			inboundPeerConn.setConnection(conn, false)
+			inboundIsClient := inboundPeerConn.hasClientConnection()
+			if !hadClientConnection || inboundIsClient {
+				// Preserve duplex-reuse semantics: a responder-only inbound
+				// must not replace an authoritative client-capable connection.
+				tmpPeer.setConnection(conn, false)
+				if tmpPeer.Connection != nil {
+					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
+					tmpPeer.State = PeerStateWarm
+				}
 			}
+			// setConnection derives IsClient from live handshake data; when
+			// available, treat it as authoritative for inbound duplex metadata.
+			tmpPeer.InboundDuplex = inboundIsClient
 		}
 	}
 	// Reset outbound backoff when an inbound connection from a

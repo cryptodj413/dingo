@@ -218,7 +218,8 @@ type inboundCounts struct {
 	// TopologyMatched is the count of peers with a non-empty
 	// InboundTopologyMatch.
 	TopologyMatched int
-	// Duplex is the count of peers with InboundDuplex set.
+	// Duplex is the count of peers with a currently-live client-capable
+	// connection and inbound-arrival metadata.
 	Duplex int
 }
 
@@ -235,7 +236,9 @@ func (p *PeerGovernor) censusInboundCounts() inboundCounts {
 		if peer.InboundTopologyMatch != "" {
 			c.TopologyMatched++
 		}
-		if peer.InboundDuplex {
+		if peer.Connection != nil &&
+			peer.Connection.IsClient &&
+			(peer.InboundDuplex || peer.InboundArrivals > 0) {
 			c.Duplex++
 		}
 		if peer.Source != PeerSourceInboundConn {
