@@ -4603,17 +4603,22 @@ func TestPeerGovernor_InboundHotQuota_CountsProvisionalHotPeers(t *testing.T) {
 
 	pg.reconcile(t.Context())
 	hotInbound := 0
-	var secondState PeerState
+	var firstState, secondState PeerState
 	for _, peer := range pg.GetPeers() {
 		if peer.Source == PeerSourceInboundConn && peer.State == PeerStateHot {
 			hotInbound++
 		}
-		if peer.Address == "192.168.11.2:3001" {
+		switch peer.Address {
+		case "192.168.11.1:3001":
+			firstState = peer.State
+		case "192.168.11.2:3001":
 			secondState = peer.State
 		}
 	}
 	assert.Equal(t, 1, hotInbound,
 		"provisional-window hot inbound must still count toward InboundHotQuota")
+	require.Equal(t, PeerStateHot, firstState,
+		"provisional hot inbound must stay hot; demote-then-promote would mask the quota invariant")
 	assert.Equal(t, PeerStateWarm, secondState,
 		"second inbound must not be promoted when quota already satisfied by actual hot inbound")
 }
