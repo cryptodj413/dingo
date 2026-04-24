@@ -4545,6 +4545,79 @@ func TestPeerGovernor_InboundHotQuota_PreventsOverPromotion(t *testing.T) {
 	assert.Equal(t, 1, hotInbound, "inbound hot promotions must respect inbound hot quota")
 }
 
+// TestPeerGovernor_InboundHotQuota_CountsProvisionalHotPeers ensures promotion
+// uses actual hot inbound count, not censusInboundCounts.Hot (which excludes
+// peers still inside InboundProvisionalWindow), so a second inbound cannot be
+// promoted past InboundHotQuota.
+func TestPeerGovernor_InboundHotQuota_CountsProvisionalHotPeers(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               2,
+		TargetNumberOfActivePeers: 2,
+		InboundHotQuota:           1,
+		InboundHotScoreThreshold:  0.6,
+		InboundMinTenure:          1 * time.Minute,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                 "192.168.11.1:3001",
+			Source:                  PeerSourceInboundConn,
+			State:                   PeerStateHot,
+			Connection:              &PeerConnection{IsClient: true},
+			FirstSeen:               now,
+			LastActivity:            now,
+			ChainSyncLastUpdate:     now,
+			TipSlotDeltaInit:        true,
+			TipSlotDelta:            0,
+			BlockFetchLatencyMs:     50,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.95,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.9,
+			ConnectionStabilityInit: true,
+			HeaderArrivalRate:       100,
+			HeaderArrivalRateInit:   true,
+		},
+		{
+			Address:                 "192.168.11.2:3001",
+			Source:                  PeerSourceInboundConn,
+			State:                   PeerStateWarm,
+			Connection:              &PeerConnection{IsClient: true},
+			FirstSeen:               now.Add(-2 * time.Minute),
+			ChainSyncLastUpdate:     now,
+			TipSlotDeltaInit:        true,
+			TipSlotDelta:            0,
+			BlockFetchLatencyMs:     50,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.95,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.9,
+			ConnectionStabilityInit: true,
+			HeaderArrivalRate:       100,
+			HeaderArrivalRateInit:   true,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	hotInbound := 0
+	var secondState PeerState
+	for _, peer := range pg.GetPeers() {
+		if peer.Source == PeerSourceInboundConn && peer.State == PeerStateHot {
+			hotInbound++
+		}
+		if peer.Address == "192.168.11.2:3001" {
+			secondState = peer.State
+		}
+	}
+	assert.Equal(t, 1, hotInbound,
+		"provisional-window hot inbound must still count toward InboundHotQuota")
+	assert.Equal(t, PeerStateWarm, secondState,
+		"second inbound must not be promoted when quota already satisfied by actual hot inbound")
+}
+
 func TestPeerGovernor_InboundSatisfiesTopologyValency(t *testing.T) {
 	pg := NewPeerGovernor(PeerGovernorConfig{
 		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
@@ -4657,6 +4730,8 @@ func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
 	})
 	now := time.Now()
 	pg.mu.Lock()
+	// No GroupID/Valency so neither candidate wins on under-valency alone;
+	// ordering must come from peerSourcePriority (topology > inbound).
 	pg.peers = []*Peer{
 		{
 			Address:          "44.0.0.1:3001",
@@ -4664,8 +4739,6 @@ func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
 			State:            PeerStateWarm,
 			Connection:       &PeerConnection{IsClient: true},
 			PerformanceScore: 0.5,
-			GroupID:          "public-root-0",
-			Valency:          1,
 			FirstSeen:        now.Add(-time.Hour),
 		},
 		{
@@ -4695,6 +4768,62 @@ func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
 		"higher-priority topology source should be promoted before inbound",
 	)
 	assert.Equal(t, PeerStateWarm, stateByAddress["44.0.0.2:3001"])
+}
+
+// TestPeerGovernor_PromotionEqualSourcePriorityUsesScore verifies that when two
+// candidates map to the same peerSourcePriority (e.g. different topology
+// kinds), ordering falls through to PerformanceScore instead of arbitrary 0.
+func TestPeerGovernor_PromotionEqualSourcePriorityUsesScore(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               1,
+		TargetNumberOfActivePeers: 1,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:    "44.0.0.10:3001",
+			Source:     PeerSourceTopologyPublicRoot,
+			State:      PeerStateWarm,
+			Connection: &PeerConnection{IsClient: true},
+			FirstSeen:  now.Add(-time.Hour),
+			// Poor composite score after UpdatePeerScore in reconcile
+			BlockFetchLatencyMs:     2000,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.1,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.1,
+			ConnectionStabilityInit: true,
+		},
+		{
+			Address:                 "44.0.0.11:3001",
+			Source:                  PeerSourceTopologyLocalRoot,
+			State:                   PeerStateWarm,
+			Connection:              &PeerConnection{IsClient: true},
+			FirstSeen:               now.Add(-time.Hour),
+			BlockFetchLatencyMs:     50,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.95,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.9,
+			ConnectionStabilityInit: true,
+			HeaderArrivalRate:       100,
+			HeaderArrivalRateInit:   true,
+			TipSlotDeltaInit:        true,
+			TipSlotDelta:            0,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	stateByAddress := map[string]PeerState{}
+	for _, peer := range pg.GetPeers() {
+		stateByAddress[peer.Address] = peer.State
+	}
+	assert.Equal(t, PeerStateHot, stateByAddress["44.0.0.11:3001"],
+		"same topology priority bucket must break ties by score")
+	assert.Equal(t, PeerStateWarm, stateByAddress["44.0.0.10:3001"])
 }
 
 // Phase 7: Enhanced Observability Tests

@@ -243,11 +243,14 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				return 1
 			}
-			if a.peer.Source != b.peer.Source {
-				return cmp.Compare(
-					p.peerSourcePriority(b.peer.Source),
-					p.peerSourcePriority(a.peer.Source),
-				)
+			// Prefer higher-priority sources when priorities differ; when two
+			// sources share the same priority (e.g. two topology kinds), fall
+			// through to score tie-breaking instead of returning 0 early.
+			if c := cmp.Compare(
+				p.peerSourcePriority(b.peer.Source),
+				p.peerSourcePriority(a.peer.Source),
+			); c != 0 {
+				return c
 			}
 			if a.peer.PerformanceScore != b.peer.PerformanceScore {
 				return cmp.Compare(
@@ -263,7 +266,17 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 		needed := refillTarget - hotCount
 		promoted := 0
-		inboundHotHeld := p.censusInboundCounts().Hot
+		// Count actual hot inbound peers (not censusInboundCounts.Hot, which
+		// excludes peers inside InboundProvisionalWindow) so quota cannot be
+		// exceeded when tenure is shorter than that window.
+		inboundHotHeld := 0
+		for _, existing := range p.peers {
+			if existing != nil &&
+				existing.Source == PeerSourceInboundConn &&
+				existing.State == PeerStateHot {
+				inboundHotHeld++
+			}
+		}
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
 			peer := candidates[i].peer
 			if peer.Source == PeerSourceInboundConn &&
