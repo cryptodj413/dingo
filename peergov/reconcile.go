@@ -243,6 +243,12 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				return 1
 			}
+			if a.peer.Source != b.peer.Source {
+				return cmp.Compare(
+					p.peerSourcePriority(b.peer.Source),
+					p.peerSourcePriority(a.peer.Source),
+				)
+			}
 			if a.peer.PerformanceScore != b.peer.PerformanceScore {
 				return cmp.Compare(
 					b.peer.PerformanceScore,
@@ -257,8 +263,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 
 		needed := refillTarget - hotCount
 		promoted := 0
+		inboundHotHeld := p.censusInboundCounts().Hot
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
 			peer := candidates[i].peer
+			if peer.Source == PeerSourceInboundConn &&
+				inboundHotHeld >= p.config.InboundHotQuota {
+				continue
+			}
 			// Check inbound peer eligibility (score threshold and tenure)
 			if !p.isInboundEligibleForHot(peer) {
 				p.config.Logger.Debug(
@@ -281,6 +292,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			warmPromotions++
 			activeIncreased++
 			promoted++
+			if peer.Source == PeerSourceInboundConn {
+				inboundHotHeld++
+			}
 			if bootstrapPromotion && candidates[i].diversityGroup != "" {
 				selectedGroups[candidates[i].diversityGroup] = struct{}{}
 			}

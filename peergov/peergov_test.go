@@ -4184,6 +4184,8 @@ func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
 			HeaderArrivalRateInit:   true,
 			TipSlotDelta:            0, // At tip
 			TipSlotDeltaInit:        true,
+			ChainSyncLastUpdate:     time.Now(),
+			LastBlockFetchTime:      time.Now(),
 		},
 	}
 	pg.mu.Unlock()
@@ -4303,6 +4305,9 @@ func TestPeerGovernor_IsInboundEligibleForHot(t *testing.T) {
 				PerformanceScore: 0.7, // Above threshold
 				FirstSeen: time.Now().
 					Add(-15 * time.Minute),
+				ChainSyncLastUpdate: time.Now(),
+				TipSlotDeltaInit:    true,
+				TipSlotDelta:        0,
 				// More than 10 min
 			},
 			expected: true,
@@ -4310,9 +4315,12 @@ func TestPeerGovernor_IsInboundEligibleForHot(t *testing.T) {
 		{
 			name: "inbound peer with exact threshold score",
 			peer: &Peer{
-				Source:           PeerSourceInboundConn,
-				PerformanceScore: 0.6, // Exact threshold
-				FirstSeen:        time.Now().Add(-15 * time.Minute),
+				Source:              PeerSourceInboundConn,
+				PerformanceScore:    0.6, // Exact threshold
+				FirstSeen:           time.Now().Add(-15 * time.Minute),
+				ChainSyncLastUpdate: time.Now(),
+				TipSlotDeltaInit:    true,
+				TipSlotDelta:        0,
 			},
 			expected: true,
 		},
@@ -4323,9 +4331,21 @@ func TestPeerGovernor_IsInboundEligibleForHot(t *testing.T) {
 				PerformanceScore: 0.8,
 				FirstSeen: time.Now().
 					Add(-10 * time.Minute),
+				ChainSyncLastUpdate: time.Now(),
+				TipSlotDeltaInit:    true,
+				TipSlotDelta:        0,
 				// Exact 10 min
 			},
 			expected: true,
+		},
+		{
+			name: "inbound peer without useful signal",
+			peer: &Peer{
+				Source:           PeerSourceInboundConn,
+				PerformanceScore: 0.8,
+				FirstSeen:        time.Now().Add(-15 * time.Minute),
+			},
+			expected: false,
 		},
 		{
 			name: "topology local root always eligible",
@@ -4438,6 +4458,243 @@ func TestPeerGovernor_InboundPeer_MixedPeerPromotion(t *testing.T) {
 		"gossip peer should be promoted to hot")
 	assert.Equal(t, PeerStateHot, gossip2State,
 		"gossip peer should be promoted to hot")
+}
+
+func TestPeerGovernor_InboundPeer_DuplexOnlyForHot(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundHotScoreThreshold: 0.6,
+		InboundMinTenure:         10 * time.Minute,
+		InboundDuplexOnlyForHot:  true,
+	})
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer := &Peer{
+		Source:              PeerSourceInboundConn,
+		State:               PeerStateWarm,
+		PerformanceScore:    0.9,
+		FirstSeen:           time.Now().Add(-time.Hour),
+		ChainSyncLastUpdate: time.Now(),
+		TipSlotDeltaInit:    true,
+		TipSlotDelta:        0,
+	}
+	assert.False(t, pg.isInboundEligibleForHot(peer))
+	peer.Connection = &PeerConnection{IsClient: true}
+	assert.True(t, pg.isInboundEligibleForHot(peer))
+}
+
+func TestPeerGovernor_InboundHotQuota_PreventsOverPromotion(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               2,
+		TargetNumberOfActivePeers: 2,
+		InboundHotQuota:           1,
+		InboundHotScoreThreshold:  0.6,
+		InboundMinTenure:          5 * time.Minute,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:                 "192.168.10.1:3001",
+			Source:                  PeerSourceInboundConn,
+			State:                   PeerStateWarm,
+			Connection:              &PeerConnection{IsClient: true},
+			FirstSeen:               now.Add(-time.Hour),
+			ChainSyncLastUpdate:     now,
+			TipSlotDeltaInit:        true,
+			TipSlotDelta:            0,
+			BlockFetchLatencyMs:     50,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.95,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.9,
+			ConnectionStabilityInit: true,
+			HeaderArrivalRate:       100,
+			HeaderArrivalRateInit:   true,
+		},
+		{
+			Address:                 "192.168.10.2:3001",
+			Source:                  PeerSourceInboundConn,
+			State:                   PeerStateWarm,
+			Connection:              &PeerConnection{IsClient: true},
+			FirstSeen:               now.Add(-time.Hour),
+			ChainSyncLastUpdate:     now,
+			TipSlotDeltaInit:        true,
+			TipSlotDelta:            0,
+			BlockFetchLatencyMs:     50,
+			BlockFetchLatencyInit:   true,
+			BlockFetchSuccessRate:   0.95,
+			BlockFetchSuccessInit:   true,
+			ConnectionStability:     0.9,
+			ConnectionStabilityInit: true,
+			HeaderArrivalRate:       100,
+			HeaderArrivalRateInit:   true,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	peers := pg.GetPeers()
+	hotInbound := 0
+	for _, peer := range peers {
+		if peer.Source == PeerSourceInboundConn && peer.State == PeerStateHot {
+			hotInbound++
+		}
+	}
+	assert.Equal(t, 1, hotInbound, "inbound hot promotions must respect inbound hot quota")
+}
+
+func TestPeerGovernor_InboundSatisfiesTopologyValency(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	})
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	pg.peers = []*Peer{
+		{
+			Address:              "44.0.0.1:3001",
+			Source:               PeerSourceTopologyLocalRoot,
+			GroupID:              "local-root-0",
+			Valency:              1,
+			State:                PeerStateHot,
+			Connection:           &PeerConnection{IsClient: true},
+			InboundDuplex:        true,
+			InboundTopologyMatch: "local-root-0",
+		},
+		{
+			Address: "44.0.0.2:3001",
+			Source:  PeerSourceTopologyLocalRoot,
+			GroupID: "local-root-0",
+			Valency: 1,
+			State:   PeerStateCold,
+		},
+	}
+	assert.True(t, pg.inboundSatisfiesTopologyValencyLocked(pg.peers[1]))
+	pg.peers[0].State = PeerStateWarm
+	assert.False(t, pg.inboundSatisfiesTopologyValencyLocked(pg.peers[1]))
+}
+
+func TestPeerGovernor_IsInboundEligibleForHot_RejectsStaleSignals(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundHotScoreThreshold: 0.6,
+		InboundMinTenure:         10 * time.Minute,
+	})
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer := &Peer{
+		Source:              PeerSourceInboundConn,
+		State:               PeerStateWarm,
+		Connection:          &PeerConnection{IsClient: true},
+		PerformanceScore:    0.9,
+		FirstSeen:           time.Now().Add(-time.Hour),
+		ChainSyncLastUpdate: time.Now().Add(-time.Hour),
+		TipSlotDeltaInit:    true,
+		TipSlotDelta:        0,
+	}
+	assert.False(t, pg.isInboundEligibleForHot(peer),
+		"stale chainsync usefulness signal must not allow hot promotion")
+}
+
+func TestPeerGovernor_IsInboundEligibleForHot_RejectsFlappingPeer(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundHotScoreThreshold: 0.6,
+		InboundMinTenure:         10 * time.Minute,
+		InboundCooldown:          5 * time.Minute,
+	})
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer := &Peer{
+		Source:              PeerSourceInboundConn,
+		State:               PeerStateWarm,
+		Connection:          &PeerConnection{IsClient: true},
+		PerformanceScore:    0.9,
+		FirstSeen:           time.Now().Add(-time.Hour),
+		ChainSyncLastUpdate: time.Now(),
+		TipSlotDeltaInit:    true,
+		TipSlotDelta:        0,
+		InboundArrivals:     3,
+		LastInboundArrival:  time.Now(),
+	}
+	assert.False(t, pg.isInboundEligibleForHot(peer),
+		"recent re-arrivals within cooldown must be treated as unstable")
+	peer.LastInboundArrival = time.Now().Add(-10 * time.Minute)
+	assert.True(t, pg.isInboundEligibleForHot(peer),
+		"once cooldown passes, peer can be promoted again")
+}
+
+func TestPeerGovernor_IsInboundEligibleForHot_BlockFetchSignalAlone(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		InboundHotScoreThreshold: 0.6,
+		InboundMinTenure:         10 * time.Minute,
+	})
+	pg.mu.Lock()
+	defer pg.mu.Unlock()
+	peer := &Peer{
+		Source:                PeerSourceInboundConn,
+		State:                 PeerStateWarm,
+		Connection:            &PeerConnection{IsClient: true},
+		PerformanceScore:      0.9,
+		FirstSeen:             time.Now().Add(-time.Hour),
+		LastBlockFetchTime:    time.Now(),
+		BlockFetchSuccessInit: true,
+		BlockFetchSuccessRate: 0.9,
+	}
+	assert.True(t, pg.isInboundEligibleForHot(peer),
+		"fresh useful blockfetch signal should be sufficient")
+}
+
+func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		MinHotPeers:               1,
+		TargetNumberOfActivePeers: 1,
+		InboundHotScoreThreshold:  0.6,
+		InboundMinTenure:          5 * time.Minute,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:          "44.0.0.1:3001",
+			Source:           PeerSourceTopologyPublicRoot,
+			State:            PeerStateWarm,
+			Connection:       &PeerConnection{IsClient: true},
+			PerformanceScore: 0.5,
+			GroupID:          "public-root-0",
+			Valency:          1,
+			FirstSeen:        now.Add(-time.Hour),
+		},
+		{
+			Address:             "44.0.0.2:3001",
+			Source:              PeerSourceInboundConn,
+			State:               PeerStateWarm,
+			Connection:          &PeerConnection{IsClient: true},
+			PerformanceScore:    0.95,
+			FirstSeen:           now.Add(-time.Hour),
+			ChainSyncLastUpdate: now,
+			TipSlotDeltaInit:    true,
+			TipSlotDelta:        0,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+	peers := pg.GetPeers()
+	stateByAddress := map[string]PeerState{}
+	for _, peer := range peers {
+		stateByAddress[peer.Address] = peer.State
+	}
+	assert.Equal(
+		t,
+		PeerStateHot,
+		stateByAddress["44.0.0.1:3001"],
+		"higher-priority topology source should be promoted before inbound",
+	)
+	assert.Equal(t, PeerStateWarm, stateByAddress["44.0.0.2:3001"])
 }
 
 // Phase 7: Enhanced Observability Tests
