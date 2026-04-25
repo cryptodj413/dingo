@@ -94,6 +94,23 @@ type MetadataStore interface {
 		types.Txn,
 	) error
 
+	// CreateDrep inserts a Drep row directly. Used by callers (e.g.
+	// fixture seeding from outside the plugin packages) that already
+	// have a fully-populated model and want a single-row insert without
+	// the registration-record side effects of ImportDrep.
+	CreateDrep(types.Txn, *models.Drep) error
+
+	// CreateAccount inserts an Account row directly. See CreateDrep
+	// for the rationale; this is the simple-insert sibling of
+	// ImportAccount.
+	CreateAccount(types.Txn, *models.Account) error
+
+	// CreateUtxo inserts a Utxo row directly. The normal block-
+	// application path uses AddUtxos with UtxoSlot inputs; this is
+	// the simple-insert variant for callers that already have a
+	// populated model.
+	CreateUtxo(types.Txn, *models.Utxo) error
+
 	// GetImportCheckpoint retrieves the checkpoint for a given
 	// import key (e.g., "{digest}:{slot}"). Returns nil if no
 	// checkpoint exists.
@@ -534,6 +551,19 @@ type MetadataStore interface {
 
 	// SetUtxosNotDeletedAfterSlot marks all UTxOs created after the given slot as not deleted.
 	SetUtxosNotDeletedAfterSlot(uint64, types.Txn) error
+
+	// RemoveByronAvvmUtxos implements the Shelley→Allegra HARDFORK rule
+	// (cardano-ledger Allegra/Translation.hs, returnRedeemAddrsToReserves).
+	// At the Shelley→Allegra boundary, every live UTxO at a Byron redeem
+	// (AVVM, ByronAddressType == 2) address is removed from the active
+	// UTxO set and its lovelace is reclaimed into reserves. Implementations
+	// mark matching rows as deleted at atSlot and return (count, total
+	// lovelace) reclaimed; callers handle the reserves accounting and
+	// rollback un-deletion (via SetUtxosNotDeletedAfterSlot).
+	RemoveByronAvvmUtxos(
+		atSlot uint64,
+		txn types.Txn,
+	) (count int, totalLovelace uint64, err error)
 
 	// Stake snapshot methods
 
