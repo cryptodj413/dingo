@@ -202,6 +202,16 @@ func (p *PeerGovernor) createOutboundConnection(peer *Peer) {
 			)
 			return
 		}
+		if currentPeer := p.peers[peerIdx]; p.inboundSatisfiesTopologyValencyLocked(currentPeer) {
+			p.mu.Unlock()
+			p.config.Logger.Info(
+				"outbound: inbound reusable topology connections already satisfy valency, suppressing outbound attempts",
+				"address", peer.Address,
+				"group", currentPeer.GroupID,
+				"valency", currentPeer.Valency,
+			)
+			return
+		}
 		// Only a client-capable connection can replace the outbound dial.
 		// This matches ouroboros-network's duplex-connection reuse: an
 		// existing inbound responder-only connection is not enough to
