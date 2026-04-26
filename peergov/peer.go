@@ -97,6 +97,7 @@ type Peer struct {
 	ConnectionStability     float64 // Connection stability score 0..1
 	ReconnectDelay          time.Duration
 	ConnectedAt             time.Time // When current outbound connection was established
+	InboundConnectedAt      time.Time // When current inbound connection was established
 	PerformanceScore        float64   // Composite score from the above metrics
 	ReconnectCount          int
 	Reconnecting            bool // Whether a reconnect goroutine is active for this peer

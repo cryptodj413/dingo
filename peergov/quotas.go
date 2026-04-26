@@ -529,7 +529,7 @@ func (p *PeerGovernor) inboundSatisfiesTopologyValencyLocked(peer *Peer) bool {
 		peer.GroupID == "" || peer.Valency == 0 {
 		return false
 	}
-	reusableInboundHot := 0
+	var reusableInboundHot uint
 	for _, candidate := range p.peers {
 		if candidate == nil ||
 			candidate.GroupID != peer.GroupID ||
@@ -540,7 +540,7 @@ func (p *PeerGovernor) inboundSatisfiesTopologyValencyLocked(peer *Peer) bool {
 			reusableInboundHot++
 		}
 	}
-	return uint(reusableInboundHot) >= peer.Valency
+	return reusableInboundHot >= peer.Valency
 }
 
 // redistributeUnusedSlots redistributes unused quota slots to other categories.
