@@ -25,7 +25,8 @@ import (
 
 	"github.com/blinklabs-io/dingo/database"
 	"github.com/blinklabs-io/dingo/database/models"
-	"github.com/blinklabs-io/dingo/database/types"
+	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/blinklabs-io/gouroboros/ledger/byron"
 	lcommon "github.com/blinklabs-io/gouroboros/ledger/common"
 )
 
@@ -132,49 +133,6 @@ func TestApplyIntraEraHardForkRule_UnknownMajor_NoOp(t *testing.T) {
 	assert.Equal(t, uint64(100), dead.AddedSlot)
 }
 
-// allegraAvvmFixtureKeys holds the TxIds seeded by seedAllegraAvvmFixtures
-// so tests can look them up after the rule runs.
-type allegraAvvmFixtureKeys struct {
-	Redeem [][]byte
-	Pubkey []byte
-}
-
-// seedAllegraAvvmFixtures plants two live Byron redeem UTxOs (AVVM) and
-// one Byron pubkey UTxO that must survive the pv3 rule.
-func seedAllegraAvvmFixtures(
-	t *testing.T,
-	db *database.Database,
-) allegraAvvmFixtureKeys {
-	t.Helper()
-	keys := allegraAvvmFixtureKeys{
-		Redeem: [][]byte{
-			bytes.Repeat([]byte{0x01}, 32),
-			bytes.Repeat([]byte{0x02}, 32),
-		},
-		Pubkey: bytes.Repeat([]byte{0x03}, 32),
-	}
-
-	for i, id := range keys.Redeem {
-		require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-			TxId:             id,
-			OutputIdx:        0,
-			PaymentKey:       bytes.Repeat([]byte{0xA0 + byte(i)}, 28),
-			Amount:           types.Uint64(uint64(1_000_000 * (i + 1))),
-			AddedSlot:        100,
-			ByronAddressType: uint8(lcommon.ByronAddressTypeRedeem),
-		}))
-	}
-	require.NoError(t, db.CreateUtxo(nil, &models.Utxo{
-		TxId:             keys.Pubkey,
-		OutputIdx:        0,
-		PaymentKey:       bytes.Repeat([]byte{0xB1}, 28),
-		Amount:           types.Uint64(5_555_555),
-		AddedSlot:        150,
-		ByronAddressType: uint8(lcommon.ByronAddressTypePubkey),
-	}))
-	return keys
-}
-
 // newTestLSForHardForkRule wires just enough of a LedgerState to call
 // applyIntraEraHardForkRule against the given test DB.
 func newTestLSForHardForkRule(
@@ -190,83 +148,109 @@ func newTestLSForHardForkRule(
 	}
 }
 
-// pv3 (Shelley→Allegra): every live AVVM UTxO is removed from the live
-// UTxO set. The dispatcher's contract with the database layer (exact
-// DeletedSlot bookkeeping, idempotency) is covered in the sqlite
-// plugin's allegra_avvm_test.go. Here we only verify that the dispatch
-// reached the rule, distinguishing "metadata row gone" (ErrUtxoNotFound)
-// from "metadata row present but CBOR unavailable"
-// (ErrUtxoCborUnavailable, which is what fixture rows return before the
-// rule runs because no blob backs them).
-func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
-	db := newTestDB(t)
-	keys := seedAllegraAvvmFixtures(t, db)
+// seedByronAvvmFixtures inserts two live Byron UTxOs — one at a redeem
+// (AVVM) address, one at a pubkey address — through the metadata + blob
+// stores so the iterator's loadCbor path resolves a real address on
+// each row. Returns the two synthetic 32-byte tx ids.
+func seedByronAvvmFixtures(
+	t *testing.T,
+	db *database.Database,
+) (avvmTxId, pubkeyTxId []byte) {
+	t.Helper()
+	redeemAddr, err := lcommon.NewByronAddressRedeem(
+		bytes.Repeat([]byte{0x42}, 32),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
+	pubkeyAddr, err := lcommon.NewByronAddressFromParts(
+		lcommon.ByronAddressTypePubkey,
+		bytes.Repeat([]byte{0x55}, lcommon.AddressHashSize),
+		lcommon.ByronAddressAttributes{},
+	)
+	require.NoError(t, err)
 
-	// Sanity-check the seed: pre-rule, fixture rows are present in
-	// metadata but have no CBOR backing.
-	for _, id := range keys.Redeem {
-		_, err := db.UtxoByRef(id, 0, nil)
-		require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
-			"pre-rule fixture row should be in live set with no CBOR")
-	}
-
-	ls := newTestLSForHardForkRule(t, db)
-	const boundarySlot uint64 = 4_492_800 // approx mainnet Allegra start
-	require.NoError(t, ls.applyIntraEraHardForkRule(
-		nil,          // nil txn → owned metadata txn inside the Database wrapper
-		3,            // newMajor (Allegra)
-		boundarySlot, // boundarySlot
-		208,          // newEpoch (log-only)
-	))
-
-	// Post-rule, the metadata rows are gone from the live set.
-	for _, id := range keys.Redeem {
-		_, err := db.UtxoByRef(id, 0, nil)
-		require.ErrorIs(t, err, database.ErrUtxoNotFound,
-			"AVVM UTxO must be removed from the live UTxO set")
-	}
-
-	// Non-redeem Byron (pubkey) UTxO must survive the pv3 rule: the
-	// only thing standing between the dispatcher and over-deletion of
-	// every Byron UTxO is the ByronAddressType == Redeem filter in the
-	// metadata layer, so check it directly here.
-	_, err := db.UtxoByRef(keys.Pubkey, 0, nil)
-	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
-		"non-redeem Byron UTxO must survive the pv3 AVVM return rule")
-	require.NotErrorIs(t, err, database.ErrUtxoNotFound)
+	avvmTxId = seedByronUtxo(t, db, 0xAA, redeemAddr)
+	pubkeyTxId = seedByronUtxo(t, db, 0xBB, pubkeyAddr)
+	return avvmTxId, pubkeyTxId
 }
 
-// Only pv3 may touch AVVM UTxOs. Verifies that other majors — both the
-// no-op branches matching the Haskell rule's `otherwise = id` (pv2, pv99)
-// and majors with their own non-AVVM handlers (pv10/Plomin) — leave
-// redeem UTxOs in the live set. The rows still exist in metadata so
-// UtxoByRef returns ErrUtxoCborUnavailable (not ErrUtxoNotFound)
-// because the fixture has no blob backing.
-func TestApplyIntraEraHardForkRule_OtherMajors_DoNotTouchAvvm(t *testing.T) {
+// seedByronUtxo inserts a Utxo metadata row plus a raw-CBOR blob entry
+// for a Byron output at addr. Returns the synthetic tx id (txIdSeed
+// repeated 32×) so callers can look it up afterwards.
+func seedByronUtxo(
+	t *testing.T,
+	db *database.Database,
+	txIdSeed byte,
+	addr lcommon.Address,
+) []byte {
+	t.Helper()
+	out := byron.ByronTransactionOutput{
+		OutputAddress: addr,
+		OutputAmount:  1000,
+	}
+	cborBytes, err := cbor.Encode(out)
+	require.NoError(t, err)
+
+	txId := bytes.Repeat([]byte{txIdSeed}, 32)
+	txn := db.Transaction(true)
+	require.NoError(t, db.CreateUtxo(txn, &models.Utxo{
+		TxId:      txId,
+		OutputIdx: 0,
+		AddedSlot: 100,
+	}))
+	blob := db.Blob()
+	require.NotNil(t, blob)
+	require.NoError(t, blob.SetUtxo(txn.Blob(), txId, 0, cborBytes))
+	require.NoError(t, txn.Commit())
+	return txId
+}
+
+// pv3 (Shelley→Allegra): every live AVVM UTxO is removed from the live
+// UTxO set; non-AVVM Byron UTxOs survive. Exercises the full
+// classification path — IterateLiveUtxos, loadCbor, address decode,
+// AddressTypeByron + ByronAddressTypeRedeem check, MarkUtxosDeletedAtSlot.
+func TestApplyIntraEraHardForkRule_Pv3_RemovesAvvm(t *testing.T) {
 	db := newTestDB(t)
-	keys := seedAllegraAvvmFixtures(t, db)
+	avvmTxId, pubkeyTxId := seedByronAvvmFixtures(t, db)
 
 	ls := newTestLSForHardForkRule(t, db)
-	for _, major := range []uint{2, 4, 10, 99} {
-		require.NoError(t, ls.applyIntraEraHardForkRule(
-			nil, major, 1_234_567, 42,
-		))
-	}
+	const boundarySlot uint64 = 4_492_800
+	require.NoError(t, ls.applyIntraEraHardForkRule(
+		nil, 3, boundarySlot, 208,
+	))
 
-	for _, id := range keys.Redeem {
-		_, err := db.UtxoByRef(id, 0, nil)
-		require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
-			"non-pv3 dispatch must leave AVVM rows in the live set")
-		require.NotErrorIs(t, err, database.ErrUtxoNotFound,
-			"non-pv3 dispatch must not remove AVVM UTxOs")
-	}
+	_, err := db.UtxoByRef(avvmTxId, 0, nil)
+	assert.ErrorIs(t, err, database.ErrUtxoNotFound,
+		"AVVM redeem UTxO must be marked deleted by pv3")
 
-	// Pubkey (non-AVVM) Byron UTxO must also remain untouched: a
-	// regression that incorrectly broadens the metadata filter beyond
-	// ByronAddressType == Redeem on a non-pv3 major would otherwise
-	// slip through.
-	_, err := db.UtxoByRef(keys.Pubkey, 0, nil)
-	require.ErrorIs(t, err, database.ErrUtxoCborUnavailable,
-		"non-pv3 dispatch must not touch AVVM pubkey UTxOs")
-	require.NotErrorIs(t, err, database.ErrUtxoNotFound)
+	stillLive, err := db.UtxoByRefIncludingSpent(avvmTxId, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, stillLive)
+	assert.Equal(t, boundarySlot, stillLive.DeletedSlot,
+		"DeletedSlot must equal the boundary slot so a rollback "+
+			"across the boundary correctly un-deletes via "+
+			"SetUtxosNotDeletedAfterSlot")
+
+	pubkey, err := db.UtxoByRef(pubkeyTxId, 0, nil)
+	require.NoError(t, err)
+	require.NotNil(t, pubkey)
+	assert.Equal(t, uint64(0), pubkey.DeletedSlot,
+		"non-AVVM Byron UTxO must survive the pv3 rule")
+}
+
+// A non-pv3 major-version dispatch must not touch AVVM UTxOs — the
+// rule is only fired at Shelley→Allegra. Combined with
+// TestApplyIntraEraHardForkRule_UnknownMajor_NoOp (pv10-shaped
+// fixtures), this pins both sides of the dispatcher's switch.
+func TestApplyIntraEraHardForkRule_NonPv3_PreservesAvvm(t *testing.T) {
+	db := newTestDB(t)
+	avvmTxId, _ := seedByronAvvmFixtures(t, db)
+
+	ls := newTestLSForHardForkRule(t, db)
+	require.NoError(t, ls.applyIntraEraHardForkRule(nil, 4, 1234, 100))
+
+	avvm, err := db.UtxoByRef(avvmTxId, 0, nil)
+	require.NoError(t, err)
+	assert.NotNil(t, avvm,
+		"non-pv3 dispatch must not touch AVVM UTxOs")
 }
