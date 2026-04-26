@@ -510,8 +510,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			State:              PeerStateCold,
 			EMAAlpha:           p.config.EMAAlpha,
 			FirstSeen:          now,
-			InboundArrivals:    1,
-			LastInboundArrival: now,
 		}
 		// Add inbound peer
 		p.peers = append(
@@ -524,8 +522,6 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			p.mu.Unlock()
 			return
 		}
-		tmpPeer.InboundArrivals++
-		tmpPeer.LastInboundArrival = now
 		// Record the topology identity once on first rule-2 match and
 		// keep it across subsequent reconnects. Rule-1 matches yield
 		// topologyGroupID == "" and must not clear a prior match.
@@ -542,6 +538,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 	if e.IsDuplex {
 		tmpPeer.InboundDuplex = true
 	}
+	tmpPeer.ConnectedAt = now
 	if p.config.ConnManager != nil {
 		conn := p.config.ConnManager.GetConnectionById(e.ConnectionId)
 		if conn != nil {
@@ -623,6 +620,27 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 		peer := p.peers[peerIdx]
 		oldSource := peer.Source
 		oldConn := clonePeerConnection(peer.Connection)
+		connClosedAt := time.Now()
+		if peer.Source == PeerSourceInboundConn {
+			connDur := time.Duration(0)
+			if !peer.ConnectedAt.IsZero() {
+				connDur = connClosedAt.Sub(peer.ConnectedAt)
+			}
+			peer.LastInboundSessionDuration = connDur
+			// Reset burst when reconnects are no longer clustered inside the
+			// inbound cooldown window.
+			if !peer.LastInboundDisconnect.IsZero() &&
+				connClosedAt.Sub(peer.LastInboundDisconnect) >= p.config.InboundCooldown {
+				peer.InboundShortLivedCount = 0
+			}
+			if !peer.ConnectedAt.IsZero() &&
+				connDur < minStableConnectionDuration {
+				peer.InboundShortLivedCount++
+			} else if !peer.ConnectedAt.IsZero() {
+				peer.InboundShortLivedCount = 0
+			}
+			peer.LastInboundDisconnect = connClosedAt
+		}
 		peer.Connection = nil
 		peer.State = PeerStateCold
 		selectionEvents = p.appendChainSelectionEventsLocked(
@@ -632,6 +650,7 @@ func (p *PeerGovernor) handleConnectionClosedEvent(evt event.Event) {
 			oldConn,
 			peer,
 		)
+		peer.ConnectedAt = time.Time{}
 		p.updatePeerMetrics()
 		// Only reconnect for outbound peers that are not on the deny list
 		if peer.Source != PeerSourceInboundConn &&

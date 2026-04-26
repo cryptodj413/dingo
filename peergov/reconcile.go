@@ -596,6 +596,7 @@ func (p *PeerGovernor) enforceStateLimit(
 			p.inboundPruned++
 			if p.metrics != nil {
 				p.metrics.inboundPruned.Inc()
+				p.metrics.inboundPrunedByReason.WithLabelValues("limit_exceeded").Inc()
 			}
 		}
 	}
@@ -667,8 +668,9 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 			"pruned inbound warm peer",
 			"address", peer.Address,
 			"reason", reason,
-			"inbound_arrivals", peer.InboundArrivals,
-			"last_inbound_arrival", peer.LastInboundArrival,
+			"inbound_short_lived_count", peer.InboundShortLivedCount,
+			"last_inbound_disconnect", peer.LastInboundDisconnect,
+			"last_inbound_session_duration", peer.LastInboundSessionDuration,
 			"prune_after", p.config.InboundPruneAfter,
 			"cooldown_applied", applyCooldown,
 			"cooldown_duration", cooldownDuration,
@@ -705,10 +707,7 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 	if peer == nil || peer.Source != PeerSourceInboundConn || peer.State != PeerStateWarm {
 		return false, "", "", 0, false
 	}
-	if peer.InboundArrivals > 1 &&
-		!peer.LastInboundArrival.IsZero() &&
-		now.Sub(peer.LastInboundArrival) <= p.config.InboundCooldown {
-		multiplier := min(int(peer.InboundArrivals), 5)
+	if flapping, multiplier := p.inboundFlappingStateLocked(peer, now); flapping {
 		cooldownDuration = p.config.InboundCooldown * time.Duration(multiplier)
 		// Keep cooldown at least as long as the normal deny duration.
 		if cooldownDuration < p.config.DenyDuration {
@@ -729,8 +728,8 @@ func (p *PeerGovernor) inboundPruneDecisionLocked(
 	if peer.LastBlockFetchTime.After(lastSignal) {
 		lastSignal = peer.LastBlockFetchTime
 	}
-	if peer.LastInboundArrival.After(lastSignal) {
-		lastSignal = peer.LastInboundArrival
+	if peer.LastInboundDisconnect.After(lastSignal) {
+		lastSignal = peer.LastInboundDisconnect
 	}
 	if peer.ConnectedAt.After(lastSignal) {
 		lastSignal = peer.ConnectedAt
