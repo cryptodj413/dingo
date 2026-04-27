@@ -284,6 +284,13 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 		}
 		for i := 0; i < len(candidates) && promoted < needed; i++ {
 			peer := candidates[i].peer
+			satisfiesTopologySlot := false
+			if peer.InboundTopologyMatch != "" {
+				if gc, ok := groups[peer.InboundTopologyMatch]; ok &&
+					gc.Valency > 0 && uint(gc.Hot) < gc.Valency { //nolint:gosec // Hot counts are always >= 0
+					satisfiesTopologySlot = true
+				}
+			}
 			if peer.Source == PeerSourceInboundConn &&
 				inboundHotHeld >= p.config.InboundHotQuota {
 				continue
@@ -354,7 +361,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					"score_threshold", p.config.InboundHotScoreThreshold,
 					"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
 					"topology_slot", peer.InboundTopologyMatch,
-					"satisfies_topology_slot", candidates[i].underValency && peer.InboundTopologyMatch != "",
+					"satisfies_topology_slot", satisfiesTopologySlot,
 				)
 			}
 			p.config.Logger.Info(logMsg, logArgs...)

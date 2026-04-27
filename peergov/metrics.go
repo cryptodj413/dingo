@@ -225,11 +225,11 @@ func (p *PeerGovernor) initMetrics() {
 	)
 	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_peerSelection_InboundHotQuotaUsage",
-		Help: "fraction of inbound hot quota currently occupied (0..1)",
+		Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
 	})
 	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(prometheus.GaugeOpts{
 		Name: "cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy",
-		Help: "fraction of inbound warm target currently occupied (0..1)",
+		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
 	})
 }
 
