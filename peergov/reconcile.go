@@ -120,6 +120,9 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 					)
 				} else {
 					p.peers[i].State = PeerStateWarm
+					if p.peers[i].Source == PeerSourceInboundConn {
+						p.recordInboundLifecycle("warmed")
+					}
 					coldPromotions++
 					p.config.Logger.Debug(
 						"promoted peer to warm",
@@ -309,6 +312,7 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 			promoted++
 			if peer.Source == PeerSourceInboundConn {
 				inboundHotHeld++
+				p.recordInboundLifecycle("promoted")
 			}
 			if bootstrapPromotion && candidates[i].diversityGroup != "" {
 				selectedGroups[candidates[i].diversityGroup] = struct{}{}
@@ -331,12 +335,29 @@ func (p *PeerGovernor) reconcile(ctx context.Context) {
 				}
 				slices.SortFunc(candidates[i+1:], rankCandidates)
 			}
-			p.config.Logger.Debug(
-				"promoted peer to hot (score-based)",
+			logMsg := "promoted peer to hot (score-based)"
+			logArgs := []any{
 				"address", peer.Address,
 				"score", peer.PerformanceScore,
 				"group", peer.GroupID,
-			)
+			}
+			if peer.Source == PeerSourceInboundConn {
+				logMsg = "promoted inbound peer"
+				tenure := time.Duration(0)
+				if !peer.FirstSeen.IsZero() {
+					tenure = now.Sub(peer.FirstSeen)
+				}
+				logArgs = append(
+					logArgs,
+					"tenure", tenure,
+					"min_tenure", p.config.InboundMinTenure,
+					"score_threshold", p.config.InboundHotScoreThreshold,
+					"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
+					"topology_slot", peer.InboundTopologyMatch,
+					"satisfies_topology_slot", candidates[i].underValency && peer.InboundTopologyMatch != "",
+				)
+			}
+			p.config.Logger.Info(logMsg, logArgs...)
 			events = append(events, pendingEvent{
 				PeerPromotedEventType,
 				PeerStateChangeEvent{
@@ -593,6 +614,7 @@ func (p *PeerGovernor) enforceStateLimit(
 		removed++
 		*removedCount++
 		if peer.Source == PeerSourceInboundConn {
+			p.recordInboundLifecycle("pruned")
 			p.inboundPruned++
 			if p.metrics != nil {
 				p.metrics.inboundPruned.Inc()
@@ -663,6 +685,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 		}
 		if applyCooldown {
 			p.denyList[peer.NormalizedAddress] = now.Add(cooldownDuration)
+			p.recordInboundLifecycle("cooled-down")
 		}
 		p.config.Logger.Info(
 			"pruned inbound warm peer",
@@ -672,6 +695,10 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 			"last_inbound_disconnect", peer.LastInboundDisconnect,
 			"last_inbound_session_duration", peer.LastInboundSessionDuration,
 			"prune_after", p.config.InboundPruneAfter,
+			"score", peer.PerformanceScore,
+			"tenure", now.Sub(peer.FirstSeen),
+			"topology_slot", peer.InboundTopologyMatch,
+			"full_duplex", peer.hasClientConnection() || peer.InboundDuplex,
 			"cooldown_applied", applyCooldown,
 			"cooldown_duration", cooldownDuration,
 		)
@@ -683,6 +710,7 @@ func (p *PeerGovernor) pruneInboundWarmPeersLocked(
 			},
 		})
 		p.peers = slices.Delete(p.peers, i, i+1)
+		p.recordInboundLifecycle("pruned")
 		p.inboundPruned++
 		*removedCount++
 		if p.metrics != nil {

@@ -489,11 +489,21 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 
 	var selectionEvents []pendingEvent
 	p.mu.Lock()
+	if p.isDeniedLocked(normalized) {
+		p.recordInboundLifecycle("denied")
+		p.config.Logger.Info(
+			"denied inbound peer during cooldown",
+			"address", address,
+		)
+		p.mu.Unlock()
+		return
+	}
 	peerIdx, topologyGroupID := p.resolveInboundIdentity(address, normalized)
 	var tmpPeer *Peer
 	if peerIdx == -1 {
 		// Enforce hard cap on peer list size for inbound peers
 		if p.isAtPeerCapLocked() {
+			p.recordInboundLifecycle("rejected")
 			p.config.Logger.Debug(
 				"rejecting inbound peer: peer list at capacity",
 				"address", address,
@@ -516,12 +526,14 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 			p.peers,
 			tmpPeer,
 		)
+		p.recordInboundLifecycle("accepted")
 	} else {
 		tmpPeer = p.peers[peerIdx]
 		if tmpPeer == nil {
 			p.mu.Unlock()
 			return
 		}
+		p.recordInboundLifecycle("accepted")
 		// Record the topology identity once on first rule-2 match and
 		// keep it across subsequent reconnects. Rule-1 matches yield
 		// topologyGroupID == "" and must not clear a prior match.
@@ -552,6 +564,7 @@ func (p *PeerGovernor) handleInboundConnectionEvent(evt event.Event) {
 				if tmpPeer.Connection != nil {
 					tmpPeer.Sharable = tmpPeer.Connection.VersionData.PeerSharing()
 					tmpPeer.State = PeerStateWarm
+					p.recordInboundLifecycle("warmed")
 				}
 			}
 			// setConnection derives IsClient from live handshake data; when
