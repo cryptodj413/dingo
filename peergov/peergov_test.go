@@ -4198,6 +4198,12 @@ func TestPeerGovernor_InboundPeer_BothRequirementsMet(t *testing.T) {
 	// header rate ~0.67, tip delta 1.0 => weighted average should be >0.6
 	assert.Equal(t, PeerStateHot, peers[0].State,
 		"inbound peer meeting both requirements should be promoted to hot")
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.inboundLifecycle.WithLabelValues("promoted")),
+		"inbound lifecycle promoted metric should increment on hot promotion",
+	)
 }
 
 // TestPeerGovernor_NonInboundPeer_UsesNormalThreshold tests that non-inbound
@@ -5069,6 +5075,132 @@ func TestPeerGovernor_Reconcile_InboundLimitExceededReasonMetric(t *testing.T) {
 		),
 		"limit exceeded inbound prune should increment reason metric",
 	)
+}
+
+func TestPeerGovernor_InboundLifecycleMetrics_RejectedAndDenied(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                   slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:             reg,
+		TargetNumberOfKnownPeers: 1, // forces maxPeerListSize=200 via hard-cap floor
+	})
+	// Fill to hard cap, then one more inbound must be rejected.
+	pg.mu.Lock()
+	for i := range pg.maxPeerListSize() {
+		addr := fmt.Sprintf("44.1.0.%d:3001", i+1)
+		pg.peers = append(pg.peers, &Peer{
+			Address:           addr,
+			NormalizedAddress: addr,
+			Source:            PeerSourceP2PGossip,
+			State:             PeerStateCold,
+			FirstSeen:         time.Now(),
+		})
+	}
+	pg.mu.Unlock()
+	localAddr, _ := net.ResolveTCPAddr("tcp", "44.0.0.9:3001")
+	remoteRejected, _ := net.ResolveTCPAddr("tcp", "44.2.0.1:40001")
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteRejected,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteRejected,
+			NormalizedRemoteAddr: connmanager.NormalizePeerAddr(remoteRejected.String()),
+		},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.inboundLifecycle.WithLabelValues("rejected")),
+	)
+
+	// Free one slot and deny an inbound explicitly.
+	pg.mu.Lock()
+	pg.peers = pg.peers[:len(pg.peers)-1]
+	remoteDenied, _ := net.ResolveTCPAddr("tcp", "44.2.0.2:40002")
+	normalizedDenied := connmanager.NormalizePeerAddr(remoteDenied.String())
+	pg.denyList[normalizedDenied] = time.Now().Add(time.Minute)
+	pg.mu.Unlock()
+	pg.handleInboundConnectionEvent(event.Event{
+		Type: connmanager.InboundConnectionEventType,
+		Data: connmanager.InboundConnectionEvent{
+			ConnectionId: ouroboros.ConnectionId{
+				LocalAddr:  localAddr,
+				RemoteAddr: remoteDenied,
+			},
+			LocalAddr:            localAddr,
+			RemoteAddr:           remoteDenied,
+			NormalizedRemoteAddr: normalizedDenied,
+		},
+	})
+	assert.Equal(
+		t,
+		float64(1),
+		testutil.ToFloat64(pg.metrics.inboundLifecycle.WithLabelValues("denied")),
+	)
+}
+
+func TestPeerGovernor_InboundLifecycleMetrics_CooldownAndOccupancy(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	pg := NewPeerGovernor(PeerGovernorConfig{
+		Logger:                    slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		PromRegistry:              reg,
+		TargetNumberOfActivePeers: -1,
+		InboundWarmTarget:         10,
+		InboundHotQuota:           2,
+		InboundHotScoreThreshold:  0.6,
+		InboundMinTenure:          5 * time.Minute,
+		InboundPruneAfter:         time.Minute,
+		InboundCooldown:           2 * time.Minute,
+		DenyDuration:              30 * time.Second,
+	})
+	now := time.Now()
+	pg.mu.Lock()
+	pg.peers = []*Peer{
+		{
+			Address:             "44.3.0.1:3001",
+			NormalizedAddress:   "44.3.0.1:3001",
+			Source:              PeerSourceInboundConn,
+			State:               PeerStateHot,
+			Connection:          &PeerConnection{IsClient: true},
+			InboundDuplex:       true,
+			PerformanceScore:    0.95,
+			FirstSeen:           now.Add(-time.Hour),
+			LastActivity:        now,
+			ChainSyncLastUpdate: now,
+			TipSlotDeltaInit:    true,
+			TipSlotDelta:        0,
+		},
+		{
+			Address:                "44.3.0.2:3001",
+			NormalizedAddress:      "44.3.0.2:3001",
+			Source:                 PeerSourceInboundConn,
+			State:                  PeerStateWarm,
+			FirstSeen:              now.Add(-2 * time.Hour),
+			LastActivity:           now.Add(-2 * time.Hour),
+			LastInboundDisconnect:  now.Add(-10 * time.Second),
+			InboundShortLivedCount: 3,
+		},
+	}
+	pg.mu.Unlock()
+
+	pg.reconcile(t.Context())
+
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		pg.metrics.inboundLifecycle.WithLabelValues("pruned"),
+	))
+	assert.Equal(t, float64(1), testutil.ToFloat64(
+		pg.metrics.inboundLifecycle.WithLabelValues("cooled-down"),
+	))
+	assert.Equal(t, float64(0.5), testutil.ToFloat64(
+		pg.metrics.inboundHotQuotaUsage,
+	), "1 hot inbound / quota 2 should report 0.5 occupancy")
+	assert.Equal(t, float64(0), testutil.ToFloat64(
+		pg.metrics.inboundWarmOccupancy,
+	), "all inbound warm peers were either promoted or pruned")
 }
 
 func TestPeerGovernor_PromotionPrefersHigherPrioritySources(t *testing.T) {

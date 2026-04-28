@@ -55,6 +55,9 @@ type peerGovernorMetrics struct {
 	inboundTopologyMatched prometheus.Gauge
 	inboundDuplexHeld      prometheus.Gauge
 	inboundPrunedByReason  *prometheus.CounterVec
+	inboundLifecycle       *prometheus.CounterVec
+	inboundHotQuotaUsage   prometheus.Gauge
+	inboundWarmOccupancy   prometheus.Gauge
 }
 
 func (p *PeerGovernor) initMetrics() {
@@ -213,6 +216,28 @@ func (p *PeerGovernor) initMetrics() {
 		},
 		[]string{"reason"},
 	)
+	p.metrics.inboundLifecycle = promautoFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cardano_node_metrics_peerSelection_InboundLifecycleTotal",
+			Help: "total inbound lifecycle transitions by stage",
+		},
+		[]string{"stage"},
+	)
+	p.metrics.inboundHotQuotaUsage = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundHotQuotaUsage",
+		Help: "fraction of inbound hot quota currently occupied (>=0; may exceed 1 when over quota)",
+	})
+	p.metrics.inboundWarmOccupancy = promautoFactory.NewGauge(prometheus.GaugeOpts{
+		Name: "cardano_node_metrics_peerSelection_InboundWarmTargetOccupancy",
+		Help: "fraction of inbound warm target currently occupied (>=0; may exceed 1 when over target)",
+	})
+}
+
+func (p *PeerGovernor) recordInboundLifecycle(stage string) {
+	if p.metrics == nil || p.metrics.inboundLifecycle == nil {
+		return
+	}
+	p.metrics.inboundLifecycle.WithLabelValues(stage).Inc()
 }
 
 // inboundCounts is the phase-2 census of inbound peers used to populate
@@ -372,6 +397,16 @@ func (p *PeerGovernor) updatePeerMetrics() {
 	census := p.censusInboundCounts()
 	p.metrics.inboundWarmHeld.Set(float64(census.Warm))
 	p.metrics.inboundHotHeld.Set(float64(census.Hot))
+	if p.config.InboundHotQuota > 0 {
+		p.metrics.inboundHotQuotaUsage.Set(float64(census.Hot) / float64(p.config.InboundHotQuota))
+	} else {
+		p.metrics.inboundHotQuotaUsage.Set(0)
+	}
+	if p.config.InboundWarmTarget > 0 {
+		p.metrics.inboundWarmOccupancy.Set(float64(census.Warm) / float64(p.config.InboundWarmTarget))
+	} else {
+		p.metrics.inboundWarmOccupancy.Set(0)
+	}
 	p.metrics.inboundTopologyMatched.Set(float64(census.TopologyMatched))
 	p.metrics.inboundDuplexHeld.Set(float64(census.Duplex))
 }
