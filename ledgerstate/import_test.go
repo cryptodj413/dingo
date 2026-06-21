@@ -26,6 +26,7 @@ import (
 	"github.com/blinklabs-io/dingo/database/models"
 	sqliteplugin "github.com/blinklabs-io/dingo/database/plugin/metadata/sqlite"
 	"github.com/blinklabs-io/gouroboros/cbor"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -415,6 +416,138 @@ func TestPersistImportedSnapshotResolvesAutoVoteOnlyForMark(t *testing.T) {
 			)
 		})
 	}
+}
+
+// TestImportSnapShotsFallbackOrderingResolvesMark verifies the key
+// correctness guarantee introduced by the Gap-1 fix: when
+// allowPoolFallback is true, pool rows must be written before auto-vote
+// resolution runs for the current-epoch mark snapshot. This test
+// exercises the component-level ordering (importPools then
+// persistImportedSnapshot) that importSnapShots now enforces, using a
+// pool whose reward account delegates to AlwaysAbstain.
+func TestImportSnapShotsFallbackOrderingResolvesMark(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires the sqlite metadata backend")
+
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x77
+	rewardAccount := make([]byte, 28)
+	rewardAccount[0] = 0x78
+
+	// Seed the reward-account delegation only. The pool row is absent
+	// until the fallback importPools call below — this mirrors the
+	// real Mithril import path where cert-state produced no pool rows.
+	require.NoError(t, store.DB().Create(&models.Account{
+		StakingKey: rewardAccount,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  1,
+		Active:     true,
+	}).Error)
+
+	const currentEpoch = uint64(102)
+	cfg := ImportConfig{
+		Database: db,
+		State: &RawLedgerState{
+			Epoch:      currentEpoch,
+			EpochNonce: []byte{0x01},
+		},
+		Logger: slog.Default(),
+	}
+
+	// Step 1: import pools from the snapshot fallback — this is what
+	// the reordered importSnapShots now does before any snapshot loop
+	// iteration.
+	require.NoError(t, importPools(
+		context.Background(),
+		cfg,
+		[]ParsedPool{{
+			PoolKeyHash:   poolKeyHash,
+			RewardAccount: rewardAccount,
+		}},
+		999,
+	))
+
+	// Step 2: persist the current-epoch mark snapshot. The resolver
+	// inside persistImportedSnapshot must now find the pool row and
+	// produce Resolved=true, AutoVote=Abstain.
+	mkSnap := []*models.PoolStakeSnapshot{{
+		Epoch:        currentEpoch,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   100,
+		CapturedSlot: 999,
+	}}
+	require.NoError(t, persistImportedSnapshot(
+		cfg,
+		999,
+		snapshotImportTarget{name: "mark", targetEpoch: currentEpoch},
+		mkSnap,
+	))
+
+	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		currentEpoch, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.True(t, stored[0].RewardAccountAutoVoteResolved,
+		"pool imported via fallback before snapshot: must be resolved")
+	assert.Equal(t, models.PoolRewardAccountAutoVoteAbstain,
+		stored[0].RewardAccountAutoVote,
+		"reward account has AlwaysAbstain: auto-vote must be Abstain")
+}
+
+// TestImportSnapShotsMissingFallbackPoolStaysUnresolved is the
+// counterpart to TestImportSnapShotsFallbackOrderingResolvesMark: it
+// verifies the defensive resolver fix — when the pool row is absent at
+// resolution time, the snapshot is left Resolved=false rather than
+// being falsely persisted as Resolved=true, AutoVote=None.
+func TestImportSnapShotsMissingFallbackPoolStaysUnresolved(t *testing.T) {
+	db, err := database.New(&database.Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	poolKeyHash := make([]byte, 28)
+	poolKeyHash[0] = 0x99
+
+	const currentEpoch = uint64(50)
+	cfg := ImportConfig{
+		Database: db,
+		State: &RawLedgerState{
+			Epoch:      currentEpoch,
+			EpochNonce: []byte{0x02},
+		},
+		Logger: slog.Default(),
+	}
+
+	// No pool row seeded — simulate what would have happened before the
+	// ordering fix if importPools had not yet run.
+	mkSnap := []*models.PoolStakeSnapshot{{
+		Epoch:        currentEpoch,
+		SnapshotType: "mark",
+		PoolKeyHash:  poolKeyHash,
+		TotalStake:   200,
+		CapturedSlot: 500,
+	}}
+	require.NoError(t, persistImportedSnapshot(
+		cfg,
+		500,
+		snapshotImportTarget{name: "mark", targetEpoch: currentEpoch},
+		mkSnap,
+	))
+
+	stored, err := db.Metadata().GetPoolStakeSnapshotsByEpoch(
+		currentEpoch, "mark", nil,
+	)
+	require.NoError(t, err)
+	require.Len(t, stored, 1)
+	assert.False(t, stored[0].RewardAccountAutoVoteResolved,
+		"pool row absent: snapshot must not be marked as authoritatively resolved")
+	assert.Equal(t, models.PoolRewardAccountAutoVoteNone,
+		stored[0].RewardAccountAutoVote)
 }
 
 func TestImportPParamsAnchorsAddedSlotToCurrentEpochStart(t *testing.T) {

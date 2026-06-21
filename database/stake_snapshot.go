@@ -36,6 +36,12 @@ import (
 // — even one whose row still carries an AlwaysAbstain or
 // AlwaysNoConfidence delegation flag — yields PoolRewardAccountAutoVoteNone,
 // since CIP-1694 treats unregistered reward accounts as implicit no.
+//
+// A snapshot whose pool key has no matching pool row in the database is
+// left with RewardAccountAutoVoteResolved=false. Only rows whose pool
+// was found are marked resolved; the absence of an
+// Always{Abstain,NoConfidence} delegation for a found pool is a real
+// "none" answer, not "unknown".
 func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	snapshots []*models.PoolStakeSnapshot,
 	txn *Txn,
@@ -54,14 +60,12 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	snapshotsByPool := make(map[string][]*models.PoolStakeSnapshot, len(snapshots))
 	pkhs := make([]lcommon.PoolKeyHash, 0, len(snapshots))
 	for _, s := range snapshots {
-		// Reset to ensure callers can re-run resolution without
-		// stale values leaking through from a previous attempt.
-		// Mark the row as resolved up-front: every snapshot passed
-		// to this resolver runs against snapshot-era state by
-		// contract, so the absence of an Always{Abstain,NoConfidence}
-		// delegation is a real "none" answer, not "unknown".
+		// Reset both fields so stale values from a previous attempt
+		// cannot leak through. Resolved stays false until we confirm
+		// the pool row exists; a missing pool means the reward account
+		// is unknown and the row must not be persisted as authoritative.
 		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
-		s.RewardAccountAutoVoteResolved = true
+		s.RewardAccountAutoVoteResolved = false
 		key := string(s.PoolKeyHash)
 		if _, seen := snapshotsByPool[key]; !seen {
 			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
@@ -78,11 +82,18 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	rewardAccounts := make([][]byte, 0, len(pools))
 	for i := range pools {
 		ra := pools[i].RewardAccount
-		if len(ra) == 0 {
-			continue
-		}
 		poolKey := string(pools[i].PoolKeyHash)
 		if _, dup := rewardAcctByPool[poolKey]; dup {
+			continue
+		}
+		// Pool row found: the absence of an AlwaysAbstain/AlwaysNoConfidence
+		// delegation for this pool is a real "none" answer. Mark all
+		// snapshots for this pool as resolved now, before we know
+		// whether the reward account exists or has a predefined DRep.
+		for _, s := range snapshotsByPool[poolKey] {
+			s.RewardAccountAutoVoteResolved = true
+		}
+		if len(ra) == 0 {
 			continue
 		}
 		rewardAcctByPool[poolKey] = ra

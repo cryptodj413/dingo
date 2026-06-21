@@ -1094,6 +1094,36 @@ func importSnapShots(
 
 	epoch := cfg.State.Epoch
 
+	if allowPoolFallback {
+		// Import pools from snapshot data before resolving snapshot
+		// auto-votes. ResolvePoolRewardAccountAutoVotes reads pool rows
+		// to look up each pool's reward account; if those rows are
+		// absent the current-epoch mark snapshot would be persisted as
+		// Resolved=true, AutoVote=None even when the pool actually
+		// delegates to AlwaysAbstain or AlwaysNoConfidence. Importing
+		// pools first guarantees the rows are present when the resolver
+		// runs inside persistImportedSnapshot below.
+		snapshotPools := collectPoolsFromSnapshots(snapshots)
+		if len(snapshotPools) > 0 {
+			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
+				return fmt.Errorf(
+					"importing pools from snapshots: %w",
+					err,
+				)
+			}
+			progress(ImportProgress{
+				Stage:   "pools",
+				Current: len(snapshotPools),
+				Total:   len(snapshotPools),
+				Percent: 100,
+				Description: fmt.Sprintf(
+					"%d pools imported from snapshots",
+					len(snapshotPools),
+				),
+			})
+		}
+	}
+
 	// Mithril exports the current epoch's Mark/Set/Go bundle, but
 	// Dingo persists only Mark snapshots and resolves Set/Go via
 	// epoch offsets:
@@ -1159,31 +1189,6 @@ func importSnapShots(
 				len(poolSnapshots),
 			),
 		})
-	}
-
-	if allowPoolFallback {
-		// Fallback pool import path:
-		// Snapshot data includes pool parameters and remains reliable when
-		// cert-state pool data is unavailable.
-		snapshotPools := collectPoolsFromSnapshots(snapshots)
-		if len(snapshotPools) > 0 {
-			if err := importPools(ctx, cfg, snapshotPools, slot); err != nil {
-				return fmt.Errorf(
-					"importing pools from snapshots: %w",
-					err,
-				)
-			}
-			progress(ImportProgress{
-				Stage:   "pools",
-				Current: len(snapshotPools),
-				Total:   len(snapshotPools),
-				Percent: 100,
-				Description: fmt.Sprintf(
-					"%d pools imported from snapshots",
-					len(snapshotPools),
-				),
-			})
-		}
 	}
 
 	return nil
