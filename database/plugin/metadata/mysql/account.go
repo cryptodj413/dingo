@@ -78,6 +78,50 @@ func (d *MetadataStoreMysql) GetAccounts(
 	return ret, nil
 }
 
+// GetAccountsDrepDelegationAtSlot returns the DRep delegation state for each
+// requested stakingkey as of the given slot, using the cert-history tables.
+// Results are keyed by string(StakingKey). AccountDrepAtSlot.HasData=false
+// means no registration cert was found at or before the slot — the absence
+// of a DRep delegation is unknown, not authoritative. A key absent from the
+// returned map is equivalent to HasData=false.
+func (d *MetadataStoreMysql) GetAccountsDrepDelegationAtSlot(
+	stakeKeys [][]byte,
+	slot uint64,
+	txn types.Txn,
+) (map[string]models.AccountDrepAtSlot, error) {
+	ret := make(map[string]models.AccountDrepAtSlot, len(stakeKeys))
+	if len(stakeKeys) == 0 {
+		return ret, nil
+	}
+	db, err := d.resolveReadDB(txn)
+	if err != nil {
+		return nil, err
+	}
+	cache, err := batchFetchCerts(db, stakeKeys, slot)
+	if err != nil {
+		return nil, fmt.Errorf("GetAccountsDrepDelegationAtSlot: fetch certs: %w", err)
+	}
+	for _, key := range stakeKeys {
+		k := string(key)
+		if !cache.hasReg[k] {
+			continue
+		}
+		latestReg := cache.latestReg[k]
+		latestDereg, hasDereg := cache.latestDereg[k], cache.hasDereg[k]
+		active := !hasDereg || latestReg.isMoreRecent(latestDereg)
+		var drepType uint64
+		if rec, ok := cache.drepDelegation[k]; ok {
+			drepType = rec.drepType
+		}
+		ret[k] = models.AccountDrepAtSlot{
+			DrepType: drepType,
+			Active:   active,
+			HasData:  true,
+		}
+	}
+	return ret, nil
+}
+
 // AddAccountReward credits a registered reward account.
 func (d *MetadataStoreMysql) AddAccountReward(
 	stakeKey []byte,

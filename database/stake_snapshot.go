@@ -130,3 +130,118 @@ func (d *Database) ResolvePoolRewardAccountAutoVotes(
 	}
 	return nil
 }
+
+// ResolvePoolRewardAccountAutoVotesAtSlot is the historical variant of
+// ResolvePoolRewardAccountAutoVotes used for imported set/go snapshots.
+// Instead of querying live pool and account rows it consults the cert-
+// history tables at boundarySlot, which is the last slot of the epoch
+// that produced the snapshot. This allows chain-synced nodes to resolve
+// historical rows that would otherwise remain permanently unresolved.
+//
+// Resolution proceeds in two batched lookups:
+//  1. GetPoolRegistrationsAtSlot yields each pool's reward account as it
+//     was at boundarySlot (not the current denormalized pool row).
+//  2. GetAccountsDrepDelegationAtSlot yields the DRep delegation type for
+//     each reward account at boundarySlot.
+//
+// A snapshot whose pool has no registration cert at or before boundarySlot
+// is left with RewardAccountAutoVoteResolved=false (unknown, not no-vote).
+// A snapshot whose reward account has no registration cert (HasData=false)
+// is also left unresolved — this is the correct conservative behaviour for
+// Mithril-bootstrapped nodes whose cert tables do not reach that far back.
+func (d *Database) ResolvePoolRewardAccountAutoVotesAtSlot(
+	snapshots []*models.PoolStakeSnapshot,
+	boundarySlot uint64,
+	txn *Txn,
+) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+
+	// Group snapshots per pool key and build the dedup'd key list.
+	snapshotsByPool := make(map[string][]*models.PoolStakeSnapshot, len(snapshots))
+	pkhs := make([]lcommon.PoolKeyHash, 0, len(snapshots))
+	for _, s := range snapshots {
+		s.RewardAccountAutoVote = models.PoolRewardAccountAutoVoteNone
+		s.RewardAccountAutoVoteResolved = false
+		key := string(s.PoolKeyHash)
+		if _, seen := snapshotsByPool[key]; !seen {
+			pkhs = append(pkhs, lcommon.PoolKeyHash(s.PoolKeyHash))
+		}
+		snapshotsByPool[key] = append(snapshotsByPool[key], s)
+	}
+
+	regs, err := d.metadata.GetPoolRegistrationsAtSlot(pkhs, boundarySlot, txn.Metadata())
+	if err != nil {
+		return fmt.Errorf("get pool registrations at slot: %w", err)
+	}
+
+	rewardAcctByPool := make(map[string][]byte, len(regs))
+	rewardAccounts := make([][]byte, 0, len(regs))
+	for i := range regs {
+		poolKey := string(regs[i].PoolKeyHash)
+		if _, dup := rewardAcctByPool[poolKey]; dup {
+			continue
+		}
+		// Pool registration cert found at boundarySlot: absence of an
+		// Always{Abstain,NoConfidence} delegation is a real "none" answer.
+		for _, s := range snapshotsByPool[poolKey] {
+			s.RewardAccountAutoVoteResolved = true
+		}
+		ra := regs[i].RewardAccount
+		if len(ra) == 0 {
+			continue
+		}
+		rewardAcctByPool[poolKey] = ra
+		rewardAccounts = append(rewardAccounts, ra)
+	}
+	if len(rewardAccounts) == 0 {
+		return nil
+	}
+
+	// Query DRep delegation at the historical boundary slot. HasData=false
+	// means no registration cert reached that far back — leave those rows
+	// unresolved (conservative: unknown rather than false "no auto-vote").
+	drepMap, err := d.metadata.GetAccountsDrepDelegationAtSlot(
+		rewardAccounts,
+		boundarySlot,
+		txn.Metadata(),
+	)
+	if err != nil {
+		return fmt.Errorf("get accounts drep delegation at slot: %w", err)
+	}
+
+	for poolKey, ra := range rewardAcctByPool {
+		info, ok := drepMap[string(ra)]
+		if !ok || !info.HasData {
+			// Cert history does not reach this slot: revert resolved flag so
+			// the row stays conservatively unresolved rather than incorrectly
+			// asserting "no auto-vote".
+			for _, s := range snapshotsByPool[poolKey] {
+				s.RewardAccountAutoVoteResolved = false
+			}
+			continue
+		}
+		if !info.Active {
+			// Deregistered at boundarySlot: CIP-1694 treats this as no vote.
+			continue
+		}
+		var autoVote uint8
+		switch info.DrepType {
+		case models.DrepTypeAlwaysAbstain:
+			autoVote = models.PoolRewardAccountAutoVoteAbstain
+		case models.DrepTypeAlwaysNoConfidence:
+			autoVote = models.PoolRewardAccountAutoVoteNoConfidence
+		default:
+			continue
+		}
+		for _, s := range snapshotsByPool[poolKey] {
+			s.RewardAccountAutoVote = autoVote
+		}
+	}
+	return nil
+}

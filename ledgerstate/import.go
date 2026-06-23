@@ -1218,21 +1218,33 @@ func persistImportedSnapshot(
 		)
 	}
 
+	// Fetch the existing epoch summary before resolving auto-votes: the
+	// BoundarySlot stored there is needed by the historical resolver for
+	// set/go snapshots, and the summary is also passed to
+	// importedEpochSummary below so we only query it once.
+	existingSummary, err := store.GetEpochSummary(
+		st.targetEpoch, metaTxn,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"getting existing epoch summary for %s snapshot epoch %d: %w",
+			st.name,
+			st.targetEpoch,
+			err,
+		)
+	}
+
 	if len(poolSnapshots) > 0 {
-		// CIP-1694 reward-account auto-vote can only be faithfully
-		// resolved when live Pool/Account state matches the row's
-		// target boundary. All three import targets are persisted as
-		// "mark" rows (only the target epoch differs: N, N-1, N-2),
-		// so gating on the source rotation name would be fragile —
-		// every row's SnapshotType is "mark" by the time it reaches
-		// this function. The correct semantic check is "is the
-		// target epoch equal to the current import-time epoch?"
-		// Only that one row's boundary matches the live state we'd
-		// read; the other two represent older boundaries and must be
-		// left RewardAccountAutoVoteResolved=false so the tally
-		// treats them as PoolRewardAccountAutoVoteNone (implicit no)
-		// instead of freezing today's delegation map onto an older
-		// boundary.
+		// CIP-1694 reward-account auto-vote resolution:
+		//
+		// For the current epoch (N) we use live Pool/Account rows which
+		// reflect the exact import-time boundary — this is the original path.
+		//
+		// For historical epochs (N-1 / N-2) we resolve from cert-history
+		// tables at the recorded BoundarySlot. This is only possible on
+		// chain-synced nodes whose cert tables reach that far back; on a
+		// fresh Mithril bootstrap the resolver will see HasData=false and
+		// conservatively leave those rows RewardAccountAutoVoteResolved=false.
 		if st.targetEpoch == cfg.State.Epoch {
 			if err := cfg.Database.ResolvePoolRewardAccountAutoVotes(
 				poolSnapshots, txn,
@@ -1242,6 +1254,19 @@ func persistImportedSnapshot(
 						"%s snapshot epoch %d: %w",
 					st.name,
 					st.targetEpoch,
+					err,
+				)
+			}
+		} else if existingSummary != nil && existingSummary.BoundarySlot > 0 {
+			if err := cfg.Database.ResolvePoolRewardAccountAutoVotesAtSlot(
+				poolSnapshots, existingSummary.BoundarySlot, txn,
+			); err != nil {
+				return fmt.Errorf(
+					"resolving historical reward-account auto-votes for "+
+						"%s snapshot epoch %d at slot %d: %w",
+					st.name,
+					st.targetEpoch,
+					existingSummary.BoundarySlot,
 					err,
 				)
 			}
@@ -1261,17 +1286,6 @@ func persistImportedSnapshot(
 	totalStake, totalDelegators := summarizePoolSnapshots(
 		poolSnapshots,
 	)
-	existingSummary, err := store.GetEpochSummary(
-		st.targetEpoch, metaTxn,
-	)
-	if err != nil {
-		return fmt.Errorf(
-			"getting existing epoch summary for %s snapshot epoch %d: %w",
-			st.name,
-			st.targetEpoch,
-			err,
-		)
-	}
 	summary := importedEpochSummary(
 		existingSummary,
 		cfg.State.Epoch,

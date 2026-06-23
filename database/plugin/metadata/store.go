@@ -304,6 +304,19 @@ type MetadataStore interface {
 		types.Txn,
 	) (map[string]*models.Account, error)
 
+	// GetAccountsDrepDelegationAtSlot returns the DRep delegation state for
+	// each requested staking key as of the given slot. Results are keyed by
+	// string(StakingKey). The AccountDrepAtSlot.HasData field distinguishes
+	// "no registration cert found for this slot range" (HasData=false, treat as
+	// unknown) from "registered but no predefined-DRep delegation" (HasData=true,
+	// DrepType=0). Staking keys with no matching cert data are omitted from the
+	// result map. An empty input returns an empty (non-nil) map and no error.
+	GetAccountsDrepDelegationAtSlot(
+		[][]byte, // stakeKeys
+		uint64,  // maxSlot
+		types.Txn,
+	) (map[string]models.AccountDrepAtSlot, error)
+
 	// AddAccountReward credits a reward account by stake credential.
 	AddAccountReward(
 		[]byte, // stakeKey

@@ -158,3 +158,148 @@ func TestResolvePoolRewardAccountAutoVotesFoundPoolNoRewardAccount(
 		"pool row found (even with no reward account): snapshot must be resolved")
 	require.Equal(t, models.PoolRewardAccountAutoVoteNone, snap.RewardAccountAutoVote)
 }
+
+// TestResolvePoolRewardAccountAutoVotesAtSlotResolvesHistory verifies that
+// a historical snapshot (set/go) is resolved to the correct auto-vote when
+// cert-history tables contain both a pool registration and a reward-account
+// DRep delegation at or before the boundary slot.
+func TestResolvePoolRewardAccountAutoVotesAtSlotResolvesHistory(t *testing.T) {
+	db, err := New(&Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires sqlite metadata backend")
+
+	pkh := make([]byte, 28)
+	pkh[0] = 0xA1
+	rewardAcct := make([]byte, 28)
+	rewardAcct[0] = 0xA2
+
+	const boundarySlot uint64 = 1000
+
+	// Pool row required as parent for the PoolRegistration FK.
+	pool := &models.Pool{PoolKeyHash: pkh, RewardAccount: rewardAcct}
+	require.NoError(t, store.DB().Create(pool).Error)
+	// Pool registration at boundarySlot.
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolKeyHash:   pkh,
+		RewardAccount: rewardAcct,
+		AddedSlot:     boundarySlot,
+		PoolID:        pool.ID,
+	}).Error)
+
+	// Reward account registered and delegating AlwaysAbstain before boundarySlot.
+	// stake_registration uses INNER JOIN certs, so we need a real cert row.
+	cert := &models.Certificate{Slot: boundarySlot - 1, CertType: 0}
+	require.NoError(t, store.DB().Create(cert).Error)
+	require.NoError(t, store.DB().Create(&models.StakeRegistration{
+		StakingKey:    rewardAcct,
+		AddedSlot:     boundarySlot - 1,
+		CertificateID: cert.ID,
+	}).Error)
+	require.NoError(t, store.DB().Create(&models.VoteDelegation{
+		StakingKey: rewardAcct,
+		DrepType:   models.DrepTypeAlwaysAbstain,
+		AddedSlot:  boundarySlot - 1,
+	}).Error)
+
+	snap := &models.PoolStakeSnapshot{
+		Epoch:        5,
+		SnapshotType: "mark",
+		PoolKeyHash:  pkh,
+		TotalStake:   1000,
+	}
+
+	require.NoError(t, db.ResolvePoolRewardAccountAutoVotesAtSlot(
+		[]*models.PoolStakeSnapshot{snap}, boundarySlot, nil,
+	))
+
+	require.True(t, snap.RewardAccountAutoVoteResolved,
+		"cert history present: snapshot must be resolved")
+	require.Equal(t, models.PoolRewardAccountAutoVoteAbstain, snap.RewardAccountAutoVote,
+		"reward account delegating AlwaysAbstain: auto-vote must be Abstain")
+}
+
+// TestResolvePoolRewardAccountAutoVotesAtSlotNoCertHistoryStaysUnresolved
+// asserts that a historical snapshot is left unresolved when the reward
+// account has no cert-history rows at or before the boundary slot. This
+// is the expected behaviour for Mithril-bootstrapped nodes whose cert
+// tables do not reach that far back.
+func TestResolvePoolRewardAccountAutoVotesAtSlotNoCertHistoryStaysUnresolved(
+	t *testing.T,
+) {
+	db, err := New(&Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	store, ok := db.Metadata().(*sqliteplugin.MetadataStoreSqlite)
+	require.True(t, ok, "test requires sqlite metadata backend")
+
+	pkh := make([]byte, 28)
+	pkh[0] = 0xB1
+	rewardAcct := make([]byte, 28)
+	rewardAcct[0] = 0xB2
+
+	const boundarySlot uint64 = 2000
+
+	// Pool row required as parent for the PoolRegistration FK.
+	pool2 := &models.Pool{PoolKeyHash: pkh, RewardAccount: rewardAcct}
+	require.NoError(t, store.DB().Create(pool2).Error)
+	// Pool registration exists at boundarySlot, but NO account cert rows.
+	require.NoError(t, store.DB().Create(&models.PoolRegistration{
+		PoolKeyHash:   pkh,
+		RewardAccount: rewardAcct,
+		AddedSlot:     boundarySlot,
+		PoolID:        pool2.ID,
+	}).Error)
+
+	snap := &models.PoolStakeSnapshot{
+		Epoch:        6,
+		SnapshotType: "mark",
+		PoolKeyHash:  pkh,
+		TotalStake:   2000,
+	}
+
+	require.NoError(t, db.ResolvePoolRewardAccountAutoVotesAtSlot(
+		[]*models.PoolStakeSnapshot{snap}, boundarySlot, nil,
+	))
+
+	require.False(t, snap.RewardAccountAutoVoteResolved,
+		"no account cert history: snapshot must stay unresolved (conservative)")
+	require.Equal(t, models.PoolRewardAccountAutoVoteNone, snap.RewardAccountAutoVote)
+}
+
+// TestResolvePoolRewardAccountAutoVotesAtSlotNoPoolRegStaysUnresolved asserts
+// that a snapshot for a pool with no registration cert at or before the
+// boundary slot is left unresolved, even if cert tables are populated for
+// other pools. This mirrors the gap in chain history where a pool was
+// registered after the historical boundary.
+func TestResolvePoolRewardAccountAutoVotesAtSlotNoPoolRegStaysUnresolved(
+	t *testing.T,
+) {
+	db, err := New(&Config{DataDir: ""})
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+
+	pkh := make([]byte, 28)
+	pkh[0] = 0xC1
+
+	const boundarySlot uint64 = 3000
+
+	// No pool_registration row for this pkh at all.
+	snap := &models.PoolStakeSnapshot{
+		Epoch:        7,
+		SnapshotType: "mark",
+		PoolKeyHash:  pkh,
+		TotalStake:   3000,
+	}
+
+	require.NoError(t, db.ResolvePoolRewardAccountAutoVotesAtSlot(
+		[]*models.PoolStakeSnapshot{snap}, boundarySlot, nil,
+	))
+
+	require.False(t, snap.RewardAccountAutoVoteResolved,
+		"no pool registration cert at boundary: snapshot must stay unresolved")
+	require.Equal(t, models.PoolRewardAccountAutoVoteNone, snap.RewardAccountAutoVote)
+}

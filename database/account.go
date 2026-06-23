@@ -157,6 +157,22 @@ func (d *Database) GetAccounts(
 	return d.metadata.GetAccounts(stakeKeys, includeInactive, txn.Metadata())
 }
 
+// GetAccountsDrepDelegationAtSlot returns the DRep delegation state for each
+// staking key as of the given slot by querying cert-history tables. Results
+// are keyed by string(StakingKey); absent keys and HasData=false mean the
+// state is unknown (no cert history available).
+func (d *Database) GetAccountsDrepDelegationAtSlot(
+	stakeKeys [][]byte,
+	slot uint64,
+	txn *Txn,
+) (map[string]models.AccountDrepAtSlot, error) {
+	if txn == nil {
+		txn = d.Transaction(false)
+		defer txn.Release()
+	}
+	return d.metadata.GetAccountsDrepDelegationAtSlot(stakeKeys, slot, txn.Metadata())
+}
+
 // AddAccountReward credits the reward balance for a registered account.
 func (d *Database) AddAccountReward(
 	stakeKey []byte,

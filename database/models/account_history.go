@@ -33,3 +33,19 @@ type AccountRegistrationHistoryRow struct {
 	TxHash     []byte
 	Action     string
 }
+
+// AccountDrepAtSlot holds the DRep delegation state for a stake account
+// as of a specific point in chain history. Returned by
+// GetAccountsDrepDelegationAtSlot for use in historical auto-vote resolution.
+type AccountDrepAtSlot struct {
+	// DrepType is the DRep delegation type at or before the queried slot.
+	// Only meaningful when HasData is true.
+	DrepType uint64
+	// Active is true when the account was registered and not deregistered
+	// at the queried slot.
+	Active bool
+	// HasData is true when at least one registration certificate at or
+	// before the queried slot was found for this account. When false the
+	// caller must treat the result as "unknown" — not as "no DRep delegation".
+	HasData bool
+}
